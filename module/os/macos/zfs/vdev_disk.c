@@ -489,18 +489,6 @@ vdev_disk_io_intr(ldi_buf_t *bp)
 	/*
 	 * thread_block / yield if this is an automated / low-priority read or
 	 * write, in order to avoid CPU starvation of user-initiated threads.
-	 *
-	 * kpreempt(KPREEMPT_SYNC) is cheap and fast on a mac with idle cores,
-	 *
-	 * However, on a busy system it effectively asks xnu to impose a
-	 * system-load-dependent delay on the forthcoming insertion of this
-	 * I/O into a z_{rd,wr}_int taskq (which even on a busy many-cored
-	 * system might send the zio without delay to checksuming and other
-	 * expensive pipeline operations).
-	 *
-	 * During a scrub this also tends to increase the difference in queue
-	 * depth and latency (zpool iostat -{q,w}) between scrubq_read and
-	 * [a]syncq I/Os to the same pool.
 	 */
 	if (zio->io_priority == ZIO_PRIORITY_SCRUB ||
 	    zio->io_priority == ZIO_PRIORITY_REMOVAL ||
@@ -710,10 +698,8 @@ vdev_disk_io_start(zio_t *zio)
 	}
 
 	/*
-	 * Dispatch scrub and other low-priority reads on a
-	 * lower-thread-priority and lower-thread-number taskq,
-	 * with other async I/Os dispatched to an appropriate
-	 * taskq, and other I/Os into a default taskq for observability.
+	 * dispatch async or scrub and other low-priority reads on appropriate
+	 * taskq, dispatch async writes on appropriate taskq.
 	 */
 	if (zio->io_type == ZIO_TYPE_READ) {
 		if (zio->io_priority == ZIO_PRIORITY_ASYNC_READ) {
