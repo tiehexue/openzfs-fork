@@ -292,7 +292,7 @@ zstream_do_decompress(int argc, char *argv[])
 			char *lzbuf = safe_calloc(payload_size);
 			(void) sfread(lzbuf, payload_size, stdin);
 
-			abd_t sabd, dabd;
+			abd_t sabd = { 0 }, dabd = { 0 };
 			abd_get_from_buf_struct(&sabd, lzbuf, payload_size);
 			abd_get_from_buf_struct(&dabd, buf, lsize);
 			int err = zio_decompress_data(c, &sabd, &dabd,

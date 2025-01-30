@@ -2136,7 +2136,7 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 			/* Skip byteswapping and checksumming (already done) */
 			return (0);
 		} else {
-			abd_t dabd;
+			abd_t dabd = {0};
 			abd_get_from_buf_struct(&dabd, buf->b_data,
 			    HDR_GET_LSIZE(hdr));
 			error = zio_decompress_data(HDR_GET_COMPRESS(hdr),
@@ -10504,7 +10504,7 @@ l2arc_log_blk_read(l2arc_dev_t *dev,
 	case ZIO_COMPRESS_LZ4: {
 		abd_t *abd = abd_alloc_linear(asize, B_TRUE);
 		abd_copy_from_buf_off(abd, this_lb, 0, asize);
-		abd_t dabd;
+		abd_t dabd = { 0 };
 		abd_get_from_buf_struct(&dabd, this_lb, sizeof (*this_lb));
 		err = zio_decompress_data(
 		    L2BLK_GET_COMPRESS((this_lbp)->lbp_prop),

@@ -4829,7 +4829,7 @@ dump_l2arc_log_blocks(int fd, const l2arc_dev_hdr_phys_t *l2dhdr,
 		default: {
 			abd_t *abd = abd_alloc_linear(asize, B_TRUE);
 			abd_copy_from_buf_off(abd, &this_lb, 0, asize);
-			abd_t dabd;
+			abd_t dabd = { 0 };
 			abd_get_from_buf_struct(&dabd, &this_lb,
 			    sizeof (this_lb));
 			int err = zio_decompress_data(L2BLK_GET_COMPRESS(

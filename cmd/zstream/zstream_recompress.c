@@ -259,7 +259,7 @@ zstream_do_recompress(int argc, char *argv[])
 			/* Read and decompress the payload */
 			(void) sfread(cbuf, payload_size, stdin);
 			if (dtype != ZIO_COMPRESS_OFF) {
-				abd_t cabd, dabd;
+				abd_t cabd = { 0 }, dabd = { 0 };
 				abd_get_from_buf_struct(&cabd,
 				    cbuf, payload_size);
 				abd_get_from_buf_struct(&dabd, dbuf,
@@ -282,7 +282,7 @@ zstream_do_recompress(int argc, char *argv[])
 
 			/* Recompress the payload */
 			if (ctype != ZIO_COMPRESS_OFF) {
-				abd_t dabd, abd;
+				abd_t dabd = { 0 }, abd = { 0 };
 				abd_get_from_buf_struct(&dabd,
 				    dbuf, drrw->drr_logical_size);
 				abd_t *pabd =
