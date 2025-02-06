@@ -1871,7 +1871,7 @@ zfs_vnop_lookup(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo)
 #if defined(NTDDI_WIN10_RS5) && (NTDDI_VERSION >= NTDDI_WIN10_RS5)
 	/* Check for ExtraCreateParameters */
 	PECP_LIST ecp = NULL;
-	ATOMIC_CREATE_ECP_CONTECT *acec = NULL;
+	ATOMIC_CREATE_ECP_CONTEXT *acec = NULL;
 	PQUERY_ON_CREATE_ECP_CONTEXT qocContext = NULL;
 	FsRtlGetEcpListFromIrp(Irp, &ecp);
 	if (ecp) {
@@ -3607,7 +3607,7 @@ set_sparse(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	return (STATUS_SUCCESS);
 }
 
-#ifndef FSCTL_GET_INTEGRITY_INFORMATION_BUFFER
+#if _WIN32_WINNT < _WIN32_WINNT_WIN8
 typedef struct _FSCTL_GET_INTEGRITY_INFORMATION_BUFFER {
     USHORT ChecksumAlgorithm;
     USHORT Reserved;
@@ -3648,7 +3648,7 @@ get_integrity_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	return (STATUS_SUCCESS);
 }
 
-#ifndef FSCTL_SET_INTEGRITY_INFORMATION_BUFFER
+#if _WIN32_WINNT < _WIN32_WINNT_WIN8
 typedef struct _FSCTL_SET_INTEGRITY_INFORMATION_BUFFER {
     USHORT ChecksumAlgorithm;
     USHORT Reserved;
