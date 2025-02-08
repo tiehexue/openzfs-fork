@@ -5060,7 +5060,6 @@ fs_read(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	boolean_t acquired_vp_lock = FALSE, wait;
 	uint64_t bytes_read;
-	PAGED_CODE();
 
 	top_level = is_top_level(Irp);
 
@@ -5715,8 +5714,6 @@ fs_write(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	NTSTATUS Status = STATUS_SUCCESS;
 	int error;
 	int pagingio = FlagOn(Irp->Flags, IRP_PAGING_IO);
-
-	PAGED_CODE();
 
 #if 0
 	dprintf("   %s minor type %d flags 0x%x mdl %d System %d "
@@ -6829,8 +6826,6 @@ _Function_class_(DRIVER_DISPATCH)
 	PIRP Irp = *PIrp;
 	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
 
-	PAGED_CODE();
-
 	dprintf("  %s: enter: major %d: minor %d: %s busDeviceObject\n",
 	    __func__, IrpSp->MajorFunction, IrpSp->MinorFunction,
 	    major2str(IrpSp->MajorFunction, IrpSp->MinorFunction));
@@ -6997,8 +6992,6 @@ _Function_class_(DRIVER_DISPATCH)
 	NTSTATUS Status;
 	PIRP Irp = *PIrp;
 	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
-
-	PAGED_CODE();
 
 	dprintf("  %s: enter: major %d: minor %d: %s ioctlDeviceObject\n",
 	    __func__, IrpSp->MajorFunction, IrpSp->MinorFunction,
@@ -7241,8 +7234,6 @@ _Function_class_(DRIVER_DISPATCH)
 	PIRP Irp = *PIrp;
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	VERIFY(zmo->type == MOUNT_TYPE_DCB);
-
-	PAGED_CODE();
 
 	dprintf("  %s: enter: major %d: minor %d: %s diskDeviceObject\n",
 	    __func__, IrpSp->MajorFunction, IrpSp->MinorFunction,
@@ -7604,7 +7595,6 @@ _Function_class_(DRIVER_DISPATCH)
 	struct vnode *hold_vp = NULL;
 	PIRP Irp = *PIrp;
 	ULONG len = 0;
-	PAGED_CODE();
 
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	VERIFY(zmo->type == MOUNT_TYPE_VCB);
@@ -8131,10 +8121,6 @@ _Function_class_(DRIVER_DISPATCH)
 	PIO_STACK_LOCATION IrpSp;
 	NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
 	mount_t *zmo = NULL;
-
-	// Storport can call itself (and hence, ourselves) so this isn't
-	// always true.
-	PAGED_CODE();
 
 	// dprintf("%s: enter\n", __func__);
 
