@@ -1,6 +1,6 @@
 ######################################################################################
 #                                                                                    #
-#    If you're looking for instructions on how to build this under windows go to     #
+s
 #https://github.com/openzfsonwindows/openzfs/blob/windows/module/os/windows/README.md#
 #                                                                                    #
 ######################################################################################
@@ -2691,7 +2691,7 @@ jobs:
       uses: suisei-cn/actions-download-file@v1.6.0
       id: winbtrs  # Remember to give an ID if you need the output filename
       with:
-        url: "https://github.com/andrewc12/ifstest/raw/main/ifs_test_kit.zip"
+        url: "https://github.com/andrewc12/ifstest/raw/refs/heads/main/ifs_test_kit.zip"
         target: ${{github.workspace}}/
 
     - name: extract
