@@ -1647,7 +1647,7 @@ dump_metaslab_stats(metaslab_t *msp)
 	    "segments", zfs_btree_numnodes(t), "maxsize", maxbuf,
 	    "freepct", free_pct);
 	(void) printf("\tIn-memory histogram:\n");
-	dump_histogram(rt->rt_histogram, RANGE_TREE_HISTOGRAM_SIZE, 0);
+	dump_histogram(rt->rt_histogram, ZFS_RANGE_TREE_HISTOGRAM_SIZE, 0);
 }
 
 static void
@@ -1770,7 +1770,8 @@ dump_metaslab_groups(spa_t *spa, boolean_t show_special)
 			(void) printf("%3llu%%\n",
 			    (u_longlong_t)mg->mg_fragmentation);
 		}
-		dump_histogram(mg->mg_histogram, RANGE_TREE_HISTOGRAM_SIZE, 0);
+		dump_histogram(mg->mg_histogram,
+		    ZFS_RANGE_TREE_HISTOGRAM_SIZE, 0);
 	}
 
 	(void) printf("\tpool %s\tfragmentation", spa_name(spa));
@@ -1779,7 +1780,7 @@ dump_metaslab_groups(spa_t *spa, boolean_t show_special)
 		(void) printf("\t%3s\n", "-");
 	else
 		(void) printf("\t%3llu%%\n", (u_longlong_t)fragmentation);
-	dump_histogram(mc->mc_histogram, RANGE_TREE_HISTOGRAM_SIZE, 0);
+	dump_histogram(mc->mc_histogram, ZFS_RANGE_TREE_HISTOGRAM_SIZE, 0);
 }
 
 static void
