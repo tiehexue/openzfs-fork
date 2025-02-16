@@ -1090,10 +1090,12 @@ volume_notification(PVOID NotificationStructure, PVOID Context)
 	DEVICE_INTERFACE_CHANGE_NOTIFICATION *dicn =
 	    (DEVICE_INTERFACE_CHANGE_NOTIFICATION *)NotificationStructure;
 
-	if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_ARRIVAL,
+	if (RtlCompareMemory(&dicn->Event,
+	    &GUID_DEVICE_INTERFACE_ARRIVAL,
 	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s arrival: %wZ\n", __func__, dicn->SymbolicLinkName);
-	} else if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_REMOVAL,
+	} else if (RtlCompareMemory(&dicn->Event,
+	    &GUID_DEVICE_INTERFACE_REMOVAL,
 	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s removal: %wZ\n", __func__, dicn->SymbolicLinkName);
 		zfs_windows_unmount_free(dicn->SymbolicLinkName);
@@ -1108,10 +1110,12 @@ pnp_notification(PVOID NotificationStructure, PVOID Context)
 	DEVICE_INTERFACE_CHANGE_NOTIFICATION *dicn =
 	    (DEVICE_INTERFACE_CHANGE_NOTIFICATION *)NotificationStructure;
 
-	if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_ARRIVAL,
-	    sizeof(GUID)) == sizeof(GUID)) {
+	if (RtlCompareMemory(&dicn->Event,
+	    &GUID_DEVICE_INTERFACE_ARRIVAL,
+	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s arrival: %wZ\n", __func__, dicn->SymbolicLinkName);
-	} else if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_REMOVAL,
+	} else if (RtlCompareMemory(&dicn->Event,
+	    &GUID_DEVICE_INTERFACE_REMOVAL,
 	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s removal: %wZ\n", __func__, dicn->SymbolicLinkName);
 	}
