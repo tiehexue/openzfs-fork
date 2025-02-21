@@ -233,8 +233,6 @@ static inline zvol_state_t *
 wzvol_find_target(uint8_t targetid, uint8_t lun)
 {
 	wzvolContext *zv_targets = STOR_wzvolDriverInfo.zvContextArray;
-	ASSERT(targetid < STOR_wzvolDriverInfo.MaximumNumberOfTargets);
-	ASSERT(lun < STOR_wzvolDriverInfo.MaximumNumberOfLogicalUnits);
 	if (targetid < STOR_wzvolDriverInfo.MaximumNumberOfTargets &&
 	    lun < STOR_wzvolDriverInfo.MaximumNumberOfLogicalUnits) {
 		int zvidx = resolveArrayIndex(targetid, lun,
@@ -265,8 +263,6 @@ wzvol_clear_targetid(uint8_t targetid, uint8_t lun, zvol_state_t *zv)
 	wzvolContext *zvc = (pwzvolContext)zv->zv_zso->zso_target_context;
 
 	ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
-	ASSERT(targetid < STOR_wzvolDriverInfo.MaximumNumberOfTargets);
-	ASSERT(lun < STOR_wzvolDriverInfo.MaximumNumberOfLogicalUnits);
 	if (targetid < STOR_wzvolDriverInfo.MaximumNumberOfTargets &&
 	    lun < STOR_wzvolDriverInfo.MaximumNumberOfLogicalUnits) {
 		/*
