@@ -63,6 +63,7 @@ extern void sysctl_os_fini(void);
 
 extern int  zvol_os_register_module(void);
 extern void zvol_os_deregister_module(void);
+extern void saveBuffer(void);
 
 #ifdef __clang__
 #error "This file should be compiled with MSVC not Clang"
@@ -97,6 +98,9 @@ OpenZFS_Fini(PDRIVER_OBJECT DriverObject)
 	system_taskq_fini();
 
 	spl_stop();
+
+	saveBuffer();
+
 #ifdef DBG
 	if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT) {
 		xprintf("Breaking into debugger after unload\n");
@@ -106,6 +110,8 @@ OpenZFS_Fini(PDRIVER_OBJECT DriverObject)
 	finiDbgCircularBuffer();
 
 	ZFSWppCleanup(DriverObject);
+
+	// IoFreeDriverObjectExtension(DriverObject);
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "OpenZFS: Goodbye.\n"));
