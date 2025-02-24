@@ -58,5 +58,9 @@
 #define	__maybe_unused __attribute__((unused))
 #endif
 
+#ifndef __must_check
+#define	__must_check __attribute__((warn_unused_result))
+#endif
+
 #endif
 #endif
