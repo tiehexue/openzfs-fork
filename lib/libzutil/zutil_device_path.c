@@ -57,6 +57,7 @@ int
 zfs_resolve_shortname(const char *name, char *path, size_t len)
 {
 	const char *env = getenv("ZPOOL_IMPORT_PATH");
+	char resolved_path[PATH_MAX];
 
 	if (env) {
 		for (;;) {
@@ -90,7 +91,21 @@ zfs_resolve_shortname(const char *name, char *path, size_t len)
 	if (zfs_resolve_shortname_os(name, path, len) == 0)
 		return (0);
 #endif
-	return (ENOENT);
+	/*
+	 * The user can pass a relative path like ./file1 for the vdev. The path
+	 * must contain a directory prefix like './file1' or '../file1'.  Simply
+	 * passing 'file1' is not allowed, as it may match a block device name.
+	 */
+	if ((strncmp(name, "./", 2) == 0 || strncmp(name, "../", 3) == 0) &&
+	    realpath(name, resolved_path) != NULL) {
+		if (access(resolved_path, F_OK) == 0) {
+			if (strlen(resolved_path) + 1 <= len) {
+				if (strlcpy(path, resolved_path, len) < len)
+					return (0); /* success */
+			}
+		}
+	}
+	return (errno = ENOENT);
 }
 
 /*
