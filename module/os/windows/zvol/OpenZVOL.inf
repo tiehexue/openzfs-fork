@@ -1,0 +1,48 @@
+[Version]
+Signature           = "$Windows NT$"
+Class              = Volume
+ClassGuid          = {71a27cdd-812a-11d0-bec7-08002be2092f}
+Provider           = %ManufacturerName%
+DriverVer          = 02/22/2025,1.0.0.0
+CatalogFile        = OpenZVOL.cat
+
+[Manufacturer]
+%Me%=Standard,NTamd64,NTx86
+
+[Standard.NTamd64]
+%ServiceDescription% = OpenZVOL_Install, ROOT\OpenZVOL
+
+[Standard.NTx86]
+%ServiceDescription% = OpenZVOL_Install, ROOT\OpenZVOL
+
+[OpenZVOL_Install]
+CopyFiles          = @OpenZVOL.sys
+
+[OpenZVOL_Install.Services]
+AddService         = OpenZVOL, 0x00000002, OpenZVOL_Service_Inst, OpenZVOL_EventLog_Inst
+
+[OpenZVOL_Service_Inst]
+ServiceType        = 1                  ; Kernel mode driver
+StartType          = 2                  ; Manual start (change to 2 for auto-start)
+ErrorControl       = 1                  ; Normal error handling
+ServiceBinary      = %12%\OpenZVOL.sys   ; %12% -> system32\drivers
+LoadOrderGroup     = SCSI Miniport
+Dependencies       = StorPort
+
+[OpenZVOL_EventLog_Inst]
+AddReg            = OpenZVOL_EventLog_AddReg
+
+[OpenZVOL_EventLog_AddReg]
+HKR,, EventMessageFile, 0x00020000, "%SystemRoot%\System32\IoLogMsg.dll;%SystemRoot%\System32\drivers\OpenZVOL.sys"
+HKR,, TypesSupported, 0x00010001, 7
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+OpenZVOL.sys = 1
+
+[Strings]
+Me                  = "Jorgen Lundman"
+ServiceDescription  = "OpenZFS Virtual Disk Controller"
+DiskName            = "OpenZFS Storport Driver Installation Disk"
