@@ -73,7 +73,8 @@ void
 vfs_mount_add(mount_t *mp)
 {
 	mutex_enter(&mount_list_lock);
-	list_insert_head(&mount_list, mp);
+	// list_insert_head(&mount_list, mp);
+	list_insert_tail(&mount_list, mp);
 	mutex_exit(&mount_list_lock);
 }
 

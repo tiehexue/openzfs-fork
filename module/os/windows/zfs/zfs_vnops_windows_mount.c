@@ -56,6 +56,8 @@
 #include <wdmsec.h>
 #pragma comment(lib, "wdmsec.lib")
 
+DEFINE_GUID(GUID_IO_VOLUME_DISMOUNT, 0xd16a55e8, 0x1059, 0x11d2,
+    0x8f, 0x61, 0x00, 0x80, 0x5f, 0xc1, 0x27, 0x0e);
 
 extern int getzfsvfs(const char *dsname, zfsvfs_t **zfvp);
 
@@ -370,6 +372,7 @@ SendIoctlToMountManager(__in ULONG IoControlCode, __in PVOID InputBuffer,
 		return (STATUS_INSUFFICIENT_RESOURCES);
 	}
 
+	// Deadlock possible here.
 	status = IoCallDriver(mountDeviceObject, irp);
 
 	if (status == STATUS_PENDING) {
@@ -630,6 +633,10 @@ void
 zfs_release_mount(mount_t *zmo)
 {
 	dprintf("Releasing mount %p\n", zmo);
+	if (zmo->ascii_name) {
+		kmem_strfree(zmo->ascii_name);
+		zmo->ascii_name = NULL;
+	}
 	FreeUnicodeString(&zmo->name);
 	FreeUnicodeString(&zmo->arc_name);
 	FreeUnicodeString(&zmo->symlink_name);
@@ -747,12 +754,12 @@ NotifyMountMgr_impl(void *arg1)
 	    L"%wZ\\",
 	    &dcb->MountMgr_name);
 
-	InitializeObjectAttributes(&poa,
-	    &dcb->mountpoint, OBJ_KERNEL_HANDLE, NULL, NULL);
-
 	dprintf("Creating reparse mountpoint on '%wZ' for "
 	    "volume '%wZ'\n",
 	    &dcb->mountpoint, &volStr);
+
+	InitializeObjectAttributes(&poa,
+	    &dcb->mountpoint, OBJ_KERNEL_HANDLE, NULL, NULL);
 
 	status = CreateReparsePoint(&poa, &volStr,
 	    &volStr);
@@ -1002,197 +1009,245 @@ zfs_windows_mount(zfs_cmd_t *zc)
 	//	deviceCharacteristics |= FILE_REMOVABLE_MEDIA;
 
 	// snprintf(buf, sizeof (buf), "\\Device\\Volume{%s}", uuid_a);
-	snprintf(buf, sizeof (buf), "\\Device\\zfs-%s", uuid_a);
 
-	pants.Buffer = buf;
-	pants.Length = strlen(buf);
-	pants.MaximumLength = PATH_MAX;
-	status = RtlAnsiStringToUnicodeString(&diskDeviceName, &pants, TRUE);
-	dprintf("%s: new devstring '%wZ'\n", __func__, &diskDeviceName);
 
-	// Autogen gives a name like \Device\00000a9
-	// We can use FILE_DEVICE_DISK and get popups like
-	// "Decide what to do with removable device E:"
-	// or FILE_DEVICE_VIRTUAL_DISK to skip popup.
-	status = IoCreateDevice(WIN_DriverObject, sizeof (mount_t),
-	    &diskDeviceName, FILE_DEVICE_DISK, // FILE_DEVICE_VIRTUAL_DISK
-	    deviceCharacteristics | FILE_DEVICE_SECURE_OPEN, FALSE,
-	    &diskDeviceObject);
+	// Big retry loop, due to flakey mountmgr
+	int retry = 0;
+	mount_t *zmo_dcb = NULL;
 
-	if (status != STATUS_SUCCESS) {
-		dprintf("IoCreateDeviceSecure returned %08lx\n", status);
-		return (status);
-	}
+	do {
+		xprintf("Mount attempt %d\n", retry);
 
-	mount_t *zmo_dcb = diskDeviceObject->DeviceExtension;
+		snprintf(buf, sizeof (buf), "\\Device\\zfs-%s", uuid_a);
 
-	zmo_dcb->type = MOUNT_TYPE_DCB;
-	zmo_dcb->size = sizeof (mount_t);
+		pants.Buffer = buf;
+		pants.Length = strlen(buf);
+		pants.MaximumLength = PATH_MAX;
+		status = RtlAnsiStringToUnicodeString(&diskDeviceName, &pants,
+		    TRUE);
+		dprintf("%s: new devstring '%wZ'\n", __func__, &diskDeviceName);
 
-	// Get ready to wait for the volume mounted notification
-	KeInitializeEvent((PRKEVENT)&zmo_dcb->volume_mounted_event,
-	    SynchronizationEvent, TRUE);
+		// Autogen gives a name like \Device\00000a9
+		// We can use FILE_DEVICE_DISK and get popups like
+		// "Decide what to do with removable device E:"
+		// or FILE_DEVICE_VIRTUAL_DISK to skip popup.
+		status = IoCreateDevice(WIN_DriverObject, sizeof (mount_t),
+		    &diskDeviceName, FILE_DEVICE_DISK,
+		    deviceCharacteristics | FILE_DEVICE_SECURE_OPEN, FALSE,
+		    &diskDeviceObject);
 
-	zfs_vfs_uuid_gen(zc->zc_name, zmo_dcb->rawuuid);
+		if (status != STATUS_SUCCESS) {
+			dprintf("IoCreateDeviceSecure returned %08lx\n",
+			    status);
+			return (status);
+		}
 
-	vfs_setfsprivate(zmo_dcb, NULL);
-	dprintf("%s: created dcb at %p asked for size %llu\n",
-	    __func__, zmo_dcb, sizeof (mount_t));
-	AsciiStringToUnicodeString(uuid_a, &zmo_dcb->uuid);
-	// Should we keep the name with slashes like "BOOM/lower" or
-	// just "lower". Turns out the name in Explorer only
-	// works for 4 chars or lower. Why?
-	AsciiStringToUnicodeStringNP(zc->zc_name, &zmo_dcb->name);
-	RtlDuplicateUnicodeString(0, &diskDeviceName, &zmo_dcb->device_name);
+		zmo_dcb = diskDeviceObject->DeviceExtension;
 
-	// strlcpy(zc->zc_value, buf, sizeof (zc->zc_value));
-	zmo_dcb->FunctionalDeviceObject = diskDeviceObject;
-	zmo_dcb->PhysicalDeviceObject = DriverExtension->PhysicalDeviceObject;
+		zmo_dcb->type = MOUNT_TYPE_DCB;
+		zmo_dcb->size = sizeof (mount_t);
 
-	dprintf("New device %p has extension %p\n",
-	    diskDeviceObject, zmo_dcb);
+		// Wait until AddDevice is called.
+		KeInitializeEvent((PRKEVENT)&zmo_dcb->volume_adddevice_event,
+		    SynchronizationEvent, FALSE);
 
-	snprintf(buf, sizeof (buf), "\\DosDevices\\Global\\Volume{%s}", uuid_a);
-	pants.Buffer = buf;
-	pants.Length = strlen(buf);
-	pants.MaximumLength = PATH_MAX;
-	status = RtlAnsiStringToUnicodeString(&symbolicLinkTarget, &pants,
-	    TRUE);
-	dprintf("%s: new symlink '%wZ'\n", __func__, &symbolicLinkTarget);
-	AsciiStringToUnicodeString(buf, &zmo_dcb->symlink_name);
+		// Get ready to wait for the volume mounted notification
+		KeInitializeEvent((PRKEVENT)&zmo_dcb->volume_mounted_event,
+		    SynchronizationEvent, FALSE);
 
-	snprintf(buf, sizeof (buf), "\\ArcName\\OpenZFS(%s)", uuid_a);
-	pants.Buffer = buf;
-	pants.Length = strlen(buf);
-	pants.MaximumLength = PATH_MAX;
-	status = RtlAnsiStringToUnicodeString(&arcLinkTarget, &pants,
-	    TRUE);
-	dprintf("%s: new symlink '%wZ'\n", __func__, &arcLinkTarget);
-	AsciiStringToUnicodeString(buf, &zmo_dcb->arc_name);
+		zfs_vfs_uuid_gen(zc->zc_name, zmo_dcb->rawuuid);
 
-	snprintf(buf, sizeof (buf), "\\Device\\ZFS{%s}", uuid_a);
-	pants.Buffer = buf;
-	pants.Length = strlen(buf);
-	pants.MaximumLength = PATH_MAX;
-	status = RtlAnsiStringToUnicodeString(&fsDeviceName, &pants, TRUE);
-	dprintf("%s: new fsname '%wZ'\n", __func__, &fsDeviceName);
-	AsciiStringToUnicodeString(buf, &zmo_dcb->fs_name);
+		vfs_setfsprivate(zmo_dcb, NULL);
+		dprintf("%s: created dcb at %p asked for size %llu\n",
+		    __func__, zmo_dcb, sizeof (mount_t));
+		AsciiStringToUnicodeString(uuid_a, &zmo_dcb->uuid);
+		// Should we keep the name with slashes like "BOOM/lower" or
+		// just "lower". Turns out the name in Explorer only
+		// works for 4 chars or lower. Why?
+		AsciiStringToUnicodeStringNP(zc->zc_name, &zmo_dcb->name);
+		RtlDuplicateUnicodeString(0, &diskDeviceName,
+		    &zmo_dcb->device_name);
+		zmo_dcb->ascii_name = kmem_strdup(zc->zc_name);
 
-	diskDeviceObject->Flags |= DO_DIRECT_IO;
-	diskDeviceObject->Flags |= DO_BUS_ENUMERATED_DEVICE;
+		// strlcpy(zc->zc_value, buf, sizeof (zc->zc_value));
+		zmo_dcb->FunctionalDeviceObject = diskDeviceObject;
 
-	// diskDeviceObject->Flags |= DO_POWER_PAGABLE;
-	diskDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+		dprintf("New device %p has extension %p\n",
+		    diskDeviceObject, zmo_dcb);
 
-	status = IoCreateSymbolicLink(&zmo_dcb->symlink_name,
-	    &zmo_dcb->device_name);
-	status = IoCreateSymbolicLink(&zmo_dcb->arc_name,
-	    &zmo_dcb->device_name);
+		/*
+		 * We do not attach the diskDeviceObject here, or all the
+		 * mounts will be under one PDO (bus) - this confuses Windows
+		 * which sends all lookups to the last mount. Instead, we keep
+		 * them separate so they become their own PDOs. They are
+		 * returned in BusRelations as expected.
+		 */
+		// zmo_dcb->AttachedDevice = IoAttachDeviceToDeviceStack(
+		//    diskDeviceObject, DriverExtension->PhysicalDeviceObject);
 
-	// zmo->VolumeDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+		snprintf(buf, sizeof (buf), "\\DosDevices\\Global\\Volume{%s}",
+		    uuid_a);
+		pants.Buffer = buf;
+		pants.Length = strlen(buf);
+		pants.MaximumLength = PATH_MAX;
+		status = RtlAnsiStringToUnicodeString(&symbolicLinkTarget,
+		    &pants, TRUE);
+		dprintf("%s: new symlink '%wZ'\n", __func__,
+		    &symbolicLinkTarget);
+		AsciiStringToUnicodeString(buf, &zmo_dcb->symlink_name);
 
-	// Call ZFS and have it setup a mount "zfsvfs"
-	// we don't have the vcb yet, but we want to find out mount
-	// problems early.
-	struct zfs_mount_args mnt_args;
-	mnt_args.struct_size = sizeof (struct zfs_mount_args);
-	mnt_args.optlen = 0;
-	mnt_args.mflag = 0; // Set flags
-	mnt_args.fspec = zc->zc_name;
+		snprintf(buf, sizeof (buf), "\\ArcName\\OpenZFS(%s)", uuid_a);
+		pants.Buffer = buf;
+		pants.Length = strlen(buf);
+		pants.MaximumLength = PATH_MAX;
+		status = RtlAnsiStringToUnicodeString(&arcLinkTarget, &pants,
+		    TRUE);
+		dprintf("%s: new symlink '%wZ'\n", __func__, &arcLinkTarget);
+		AsciiStringToUnicodeString(buf, &zmo_dcb->arc_name);
 
-	// zc_cleanup_fd carrier mount flags for now.
-	if (zc->zc_cleanup_fd & MNT_RDONLY)
-		vfs_setrdonly(zmo_dcb);
+		snprintf(buf, sizeof (buf), "\\Device\\ZFS{%s}", uuid_a);
+		pants.Buffer = buf;
+		pants.Length = strlen(buf);
+		pants.MaximumLength = PATH_MAX;
+		status = RtlAnsiStringToUnicodeString(&fsDeviceName, &pants,
+		    TRUE);
+		dprintf("%s: new fsname '%wZ'\n", __func__, &fsDeviceName);
+		AsciiStringToUnicodeString(buf, &zmo_dcb->fs_name);
 
-	// Mount will temporarily be pointing to "dcb" until the
-	// zfs_vnop_mount() below corrects it to "vcb".
-	status = zfs_vfs_mount(zmo_dcb, NULL, (user_addr_t)&mnt_args, NULL);
-	dprintf("%s: zfs_vfs_mount() returns %ld\n", __func__, status);
+		diskDeviceObject->Flags |= DO_DIRECT_IO;
+		diskDeviceObject->Flags |= DO_BUS_ENUMERATED_DEVICE;
+		// diskDeviceObject->Flags |= DO_POWER_PAGABLE;
+		diskDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
-	if (status) {
+		status = IoCreateSymbolicLink(&zmo_dcb->symlink_name,
+		    &zmo_dcb->device_name);
+		dprintf("%s: IoCreateSymbolicLink %lu\n", __func__,
+		    status);
+		status = IoCreateSymbolicLink(&zmo_dcb->arc_name,
+		    &zmo_dcb->device_name);
+		dprintf("%s: IoCreateSymbolicLink %lu\n", __func__,
+		    status);
+
+		// zmo->VolumeDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+		// zc_cleanup_fd carrier mount flags for now.
+		if (zc->zc_cleanup_fd & MNT_RDONLY)
+			vfs_setrdonly(zmo_dcb);
+	// mount was here
+		// Check if we are to mount with driveletter, or path
+		// We already check that path is "\\??\\" above, and
+		// at least 6 chars. Seventh char can be zero, or "/"
+		// then zero, for drive only mount.
+		if ((zc->zc_value[6] == 0) ||
+		    ((zc->zc_value[6] == '/') &&
+		    (zc->zc_value[7] == 0))) {
+			zmo_dcb->justDriveLetter = B_TRUE;
+		} else {
+			zmo_dcb->justDriveLetter = B_FALSE;
+		}
+
+		AsciiStringToUnicodeString(zc->zc_value, &zmo_dcb->mountpoint);
+
+		dprintf("%s: driveletter %d '%wZ'\n",
+		    __func__, zmo_dcb->justDriveLetter, &zmo_dcb->mountpoint);
+
+		// Mark devices as initialized
+		// diskDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+		// ObReferenceObject(diskDeviceObject);
+
+		/*
+		 * IoVerifyVolume() kicks off quite a large amount of work
+		 * which can grow the stack very large. Usually it goes
+		 * something like:
+		 * IoVerifyVolume()
+		 * NtIoCallDriver()
+		 * zfs_vnop_mount()
+		 * CreateReparsePoint()
+		 * NtIoCallDriver()
+		 * zfs_vnop_lookup()
+		 * zfs_mkdir()
+		 * dnode_allocate()
+		 * dbuf_dirty()
+		 * so any cal to kmem_alloc() which might trigger a
+		 * magazine alloc would tip us over.
+		 */
+
+		// Add to list for BusRelations
+		dprintf("%s: Adding zmo %p with FDO %p on list.\n",
+		    __func__, zmo_dcb, zmo_dcb->FunctionalDeviceObject);
+
+		// Add to the list of mounts, for BusRelations query
+		vfs_mount_add(zmo_dcb);
+
+		// Set the mountpoint, might be "/" for driveletters or
+		// a subdirectory for lower mounts.
+		char *rootpath = &zc->zc_value[6]; // Above checks for \\??\\x:
+		while (rootpath[0] == '\\' &&
+		    rootpath[1] == '\\')
+			rootpath++;
+		vfs_set_mountedon(zmo_dcb, rootpath);
+
+		// Return volume name to userland
+		snprintf(zc->zc_value, sizeof (zc->zc_value),
+		    "\\DosDevices\\Global\\Volume{%s}", uuid_a);
+
+		// Ping the bus, Windows will now query BusRelations to
+		// get list of mounts.
+		IoInvalidateDeviceRelations(
+		    DriverExtension->PhysicalDeviceObject, BusRelations);
+
+		// Free diskDeviceName
+		FreeUnicodeString(&diskDeviceName);
+
+		/*
+		 * Here the rest of the mount will happen async, but
+		 * if we return now, userland will carry on and mount the
+		 * next thing, which might live in this mount, so we
+		 * wait for the event to signal completion, before returning.
+		 * Unix call mount() will only return once it is fully mounted.
+		 */
+		dprintf("Waiting on AddDevice\n");
+		LARGE_INTEGER timeout;
+		timeout.QuadPart = -10000000 * 4; // 10s
+		status = KeWaitForSingleObject(&zmo_dcb->volume_adddevice_event,
+		    Executive, KernelMode, TRUE, &timeout);
+
+		dprintf("AddDevice wait said %d.\n", status);
+
+		// If mount went well, we can exit loop.
+		if (status != STATUS_TIMEOUT)
+			break;
+
+		// This mount failed, delete everything, try again.
+		dprintf("Timeout waiting for AddDevice\n");
+		// DbgBreakPoint();
+		vfs_set_mountedon(zmo_dcb, NULL);
+		vfs_mount_remove(zmo_dcb);
 		IoDeleteSymbolicLink(&zmo_dcb->symlink_name);
 		IoDeleteSymbolicLink(&zmo_dcb->arc_name);
+		zfs_release_mount(zmo_dcb);
+		if (zmo_dcb->AttachedDevice)
+			IoDetachDevice(zmo_dcb->AttachedDevice);
 		IoDeleteDevice(diskDeviceObject);
-		return (status);
-	}
 
-	// Check if we are to mount with driveletter, or path
-	// We already check that path is "\\??\\" above, and
-	// at least 6 chars. Seventh char can be zero, or "/"
-	// then zero, for drive only mount.
-	if ((zc->zc_value[6] == 0) ||
-	    ((zc->zc_value[6] == '/') &&
-	    (zc->zc_value[7] == 0))) {
-		zmo_dcb->justDriveLetter = B_TRUE;
-	} else {
-		zmo_dcb->justDriveLetter = B_FALSE;
-	}
+		retry++;
+		if (retry >= 3) {
+			dprintf("Too many retries, giving up\n");
+			return (STATUS_MOUNT_POINT_NOT_RESOLVED);
+		}
 
-	AsciiStringToUnicodeString(zc->zc_value, &zmo_dcb->mountpoint);
+	} while (1);
 
-	dprintf("%s: driveletter %d '%wZ'\n",
-	    __func__, zmo_dcb->justDriveLetter, &zmo_dcb->mountpoint);
+	dprintf("Finished AddDevice retry %d\n", retry);
+	xprintf("Finished AddDevice retry %d\n", retry);
 
-	// Mark devices as initialized
-	// diskDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-	// ObReferenceObject(diskDeviceObject);
-
-	/*
-	 * IoVerifyVolume() kicks off quite a large amount of work
-	 * which can grow the stack very large. Usually it goes
-	 * something like:
-	 * IoVerifyVolume()
-	 * NtIoCallDriver()
-	 * zfs_vnop_mount()
-	 * CreateReparsePoint()
-	 * NtIoCallDriver()
-	 * zfs_vnop_lookup()
-	 * zfs_mkdir()
-	 * dnode_allocate()
-	 * dbuf_dirty()
-	 * so any cal to kmem_alloc() which might trigger a
-	 * magazine alloc would tip us over.
-	 */
-
-	// Add to list for BusRelations
-	vfs_mount_add(zmo_dcb);
-
-	// Set the mountpoint, might be "/" for driveletters or
-	// a subdirectory for lower mounts.
-	char *rootpath = &zc->zc_value[6]; // Above checks for \\??\\x:
-	while (rootpath[0] == '\\' &&
-	    rootpath[1] == '\\')
-		rootpath++;
-	vfs_set_mountedon(zmo_dcb, rootpath);
-
-	// Return volume name to userland
-	snprintf(zc->zc_value, sizeof (zc->zc_value),
-	    "\\DosDevices\\Global\\Volume{%s}", uuid_a);
-
-
-//	DriverExtension->LowerDeviceObject = IoAttachDeviceToDeviceStack(
-//	    diskDeviceObject, DriverExtension->PhysicalDeviceObject);
-
-	IoInvalidateDeviceRelations(DriverExtension->PhysicalDeviceObject,
-	    BusRelations);
-
-	// Free diskDeviceName
-	FreeUnicodeString(&diskDeviceName);
-	
-	/*
-	 * Here the rest of the mount will happen async, but
-	 * if we return now, userland will carry on and mount the
-	 * next thing, which might live in this mount, so we
-	 * wait for the event to signal completion, before returning.
-	 * Unix call mount() will only return once it is fully mounted.
-	 */
 	dprintf("Waiting mount to finish\n");
 	LARGE_INTEGER timeout;
-	timeout.QuadPart = -100000 * 10;
+	timeout.QuadPart = -10000000 * 10; // 10s
 	status = KeWaitForSingleObject(&zmo_dcb->volume_mounted_event,
 	    Executive, KernelMode, TRUE, &timeout);
 
-	dprintf("Wait said %d.\n", status);
+	dprintf("Mount wait said %d.\n", status);
 
 	status = STATUS_SUCCESS;
 	return (status);
@@ -1208,9 +1263,11 @@ zfs_windows_mount(zfs_cmd_t *zc)
  */
 
 static void
-mount_volume_impl(mount_t *dcb, mount_t *vcb)
+mount_volume_impl(void *arg1)
 {
 	NTSTATUS status;
+	mount_t *vcb = arg1;
+	mount_t *dcb = vcb->parent_device;
 
 	dprintf("MOUNT starts here\n");
 
@@ -1230,11 +1287,12 @@ mount_volume_impl(mount_t *dcb, mount_t *vcb)
 	 */
 	status = IoGetDeviceObjectPointer(&name, FILE_READ_ATTRIBUTES,
 	    &fileObject, &mountmgr);
-	mountmgr_get_mountpoint2(mountmgr, &dcb->device_name,
-	    &symbolicname, &mountpath,
-	    TRUE);
-	ObDereferenceObject(fileObject);
-
+	if (NT_SUCCESS(status)) {
+		mountmgr_get_mountpoint2(mountmgr, &dcb->device_name,
+		    &symbolicname, &mountpath,
+		    TRUE);
+		ObDereferenceObject(fileObject);
+	}
 	RtlDuplicateUnicodeString(0, &symbolicname, &dcb->MountMgr_name);
 	RtlDuplicateUnicodeString(0, &mountpath, &dcb->MountMgr_mountpoint);
 
@@ -1254,10 +1312,11 @@ mount_volume_impl(mount_t *dcb, mount_t *vcb)
 			DECLARE_UNICODE_STRING_SIZE(mountpoint, PATH_MAX);
 			status = IoGetDeviceObjectPointer(&name,
 			    FILE_READ_ATTRIBUTES, &fileObject, &mountmgr);
-
-			status = mountmgr_get_volume_name_mountpoint(mountmgr,
-			    &dcb->device_name, &mountpoint);
-			ObDereferenceObject(fileObject);
+			if (NT_SUCCESS(status)) {
+				status = mountmgr_get_volume_name_mountpoint(
+				    mountmgr, &dcb->device_name, &mountpoint);
+				ObDereferenceObject(fileObject);
+			}
 
 			if (!MOUNTMGR_IS_VOLUME_NAME(&mountpoint)) {
 				// We have no volume name mountpoint for our
@@ -1281,22 +1340,26 @@ mount_volume_impl(mount_t *dcb, mount_t *vcb)
 				status = IoGetDeviceObjectPointer(&name,
 				    FILE_READ_ATTRIBUTES, &fileObject,
 				    &mountmgr);
-
-				status = mountmgr_is_driveletter_assigned(
-				    mountmgr,
-				    dcb->mountpoint.Buffer[4], &ret);
-				ObDereferenceObject(fileObject);
-
+				if (NT_SUCCESS(status)) {
+					status =
+					    mountmgr_is_driveletter_assigned(
+					    mountmgr,
+					    dcb->mountpoint.Buffer[4], &ret);
+					ObDereferenceObject(fileObject);
+				}
 				if (status == STATUS_SUCCESS && ret == 0) {
 					// driveletter is unassigned, try to
 					// add mountpoint
 					status = IoGetDeviceObjectPointer(&name,
 					    FILE_READ_ATTRIBUTES, &fileObject,
 					    &mountmgr);
-					status = mountmgr_assign_driveletter(
-					    &dcb->device_name,
-					    dcb->mountpoint.Buffer[4]);
-					ObDereferenceObject(fileObject);
+					if (NT_SUCCESS(status)) {
+						status =
+						    mountmgr_assign_driveletter(
+						    &dcb->device_name,
+						    dcb->mountpoint.Buffer[4]);
+						ObDereferenceObject(fileObject);
+					}
 				} else {
 					// driveletter already assigned,
 					// find another one
@@ -1347,9 +1410,7 @@ mount_volume_impl(mount_t *dcb, mount_t *vcb)
 		}
 	} else {
 
-		// Fire off the announce
-		taskq_dispatch(system_taskq, NotifyMountMgr_impl,
-		    dcb, TQ_SLEEP);
+		NotifyMountMgr_impl(dcb);
 
 		status = STATUS_SUCCESS;
 	}
@@ -1367,8 +1428,11 @@ mount_volume_impl(mount_t *dcb, mount_t *vcb)
 	    &fileObject, &mountmgr);
 	mountmgr_get_mountpoint2(mountmgr, &dcb->device_name,
 	    NULL, NULL, TRUE);
-	ObDereferenceObject(fileObject);
+	if (NT_SUCCESS(status))
+		ObDereferenceObject(fileObject);
 
+	// This might need fixing
+	delay(hz / 10);
 	dprintf("Releasing mount wait\n");
 	KeSetEvent((PRKEVENT)&dcb->volume_mounted_event,
 	    SEMAPHORE_INCREMENT, FALSE);
@@ -1380,7 +1444,7 @@ NTSTATUS
 matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
     mount_t *dcb, PVPB vpb)
 {
-	zfsvfs_t *xzfsvfs = vfs_fsprivate(dcb);
+	zfsvfs_t *xzfsvfs = NULL;
 	NTSTATUS status;
 	PDEVICE_OBJECT volDeviceObject;
 
@@ -1426,6 +1490,9 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 	// volDeviceObject->Flags |= DO_BUS_ENUMERATED_DEVICE;
 	volDeviceObject->SectorSize = 512;
 
+	zfsvfs_t *zfsvfs = NULL;
+#if 0
+
 	zfsvfs_t *zfsvfs = vfs_fsprivate(dcb);
 	int giveup = 0;
 	// This should be cleaned up with proper sync/condvar
@@ -1445,6 +1512,45 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 	// dcb during this mount hand over, make them be owned by
 	// vcb
 	vfs_changeowner(dcb, vcb);
+#else
+
+	// Call ZFS to mount now, if it fail, undo mount.
+	struct zfs_mount_args mnt_args;
+	mnt_args.struct_size = sizeof (struct zfs_mount_args);
+	mnt_args.optlen = 0;
+	mnt_args.mflag = 0; // Set flags
+	mnt_args.fspec = dcb->ascii_name;
+
+	dprintf("Calling ZFS mount\n");
+	status = zfs_vfs_mount(vcb, NULL, (user_addr_t)&mnt_args, NULL);
+	dprintf("%s: zfs_vfs_mount() returns %ld\n", __func__, status);
+
+	if (status) {
+		zfs_release_mount(vcb);
+		IoDeleteDevice(volDeviceObject);
+
+		status = IoSetDeviceInterfaceState(
+		    &dcb->fsInterfaceName, FALSE);
+		status = IoSetDeviceInterfaceState(
+		    &dcb->deviceInterfaceName, FALSE);
+		IoDeleteSymbolicLink(&dcb->symlink_name);
+		IoDeleteSymbolicLink(&dcb->arc_name);
+		if (dcb->AttachedDevice)
+			IoDetachDevice(dcb->AttachedDevice);
+		zfs_release_mount(dcb);
+		IoDeleteDevice(dcb->FunctionalDeviceObject);
+		return (STATUS_UNRECOGNIZED_VOLUME);
+	}
+
+	zfsvfs = vfs_fsprivate(vcb);
+	zfsvfs->z_vfs = vcb;
+
+	vfs_setfsprivate(dcb, zfsvfs);
+	xzfsvfs = vfs_fsprivate(dcb);
+	xzfsvfs->z_vfs = vcb;
+
+#endif
+
 
 	// Remember the parent device, so during unmount we can free both.
 	vcb->parent_device = dcb;
@@ -1471,6 +1577,16 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 	InitializeListHead(&vcb->DirNotifyList);
 	FsRtlNotifyInitializeSync(&vcb->NotifySync);
 
+	KIRQL OldIrql;
+
+	IoAcquireVpbSpinLock(&OldIrql);
+	InitVpb(vpb, volDeviceObject, dcb);
+	volDeviceObject->Vpb = vpb;
+	vcb->vpb = vpb;
+	vpb->ReferenceCount += 1;
+	// dcb->vpb = vpb;
+	IoReleaseVpbSpinLock(OldIrql);
+
 	vcb->root_file = IoCreateStreamFileObject(NULL, DeviceToMount);
 	if (vcb->root_file != NULL) {
 		struct vnode *vp;
@@ -1486,27 +1602,21 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 		    0ULL,
 		    FILE_READ_ATTRIBUTES);
 		if (NT_SUCCESS(status)) {
-			vp = vcb->root_file->FsContext;
+			znode_t *zp;
+			zfs_ccb_t *zccb = NULL;
+			// vp = vcb->root_file->FsContext;
 			/* This open needs to point to the real root zp */
+			if (zfs_zget(zfsvfs, zfsvfs->z_root, &zp) == 0) {
+				zfs_couplefileobject(ZTOV(zp), NULL,
+				    vcb->root_file, 0ULL, &zccb, 0ULL, 0, NULL);
+				zrele(zp);
+			}
 			vcb->root_file->Vpb = vpb;
 		} else {
 			ObDereferenceObject(vcb->root_file);
 			vcb->root_file = NULL;
 		}
 	}
-
-	KIRQL OldIrql;
-
-	IoAcquireVpbSpinLock(&OldIrql);
-	InitVpb(vpb, volDeviceObject, dcb);
-	volDeviceObject->Vpb = vpb;
-	vcb->vpb = vpb;
-	vpb->ReferenceCount++;
-
-	// So we can reply to FileFsVolumeInformation
-	dcb->vpb = vpb;
-
-	IoReleaseVpbSpinLock(OldIrql);
 
 	DeviceToMount->Flags |= DO_DIRECT_IO;
 	// volDeviceObject->Flags |= DO_DIRECT_IO;
@@ -1520,20 +1630,19 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 	// Ntfs does not even call IoAttachDeviceToDeviceStack().
 	// However, we attach, so we can relay the IRP down to our
 	// disk device easily.
-#if 0
+#if 1
 	// This deadlocks between fltmgr and mountmgr
 	PDEVICE_OBJECT attachedDevice;
 	attachedDevice = IoAttachDeviceToDeviceStack(volDeviceObject,
-	    DeviceObject); // DeviceToMount); // definitely deadlocks
-	    // DeviceToMount); // DeviceToMount);
+	    DeviceToMount); // DeviceToMount); // definitely deadlocks
 	if (attachedDevice == NULL) {
 		IoDeleteDevice(volDeviceObject);
 		status = STATUS_UNSUCCESSFUL;
 		goto out;
 	}
 	vcb->AttachedDevice = attachedDevice;
-	volDeviceObject->StackSize = DeviceObject->StackSize + 1;
 #endif
+
 	volDeviceObject->StackSize = DeviceObject->StackSize + 1;
 
 	status = STATUS_SUCCESS;
@@ -1549,8 +1658,12 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 	 */
 
 	if (NT_SUCCESS(status)) {
-		mount_volume_impl(dcb, vcb);
+		// We can do no MountMgr work in the IRP_MN_MOUNT_VOLUME
+		// path, so punt that off in a separate thread.
+		taskq_dispatch(system_taskq, mount_volume_impl,
+		    vcb, TQ_SLEEP);
 	}
+
 	dprintf("%s completed.\n", __func__);
 out:
 	return (status);
@@ -1577,13 +1690,13 @@ zfs_vnop_mount(PDEVICE_OBJECT DiskDevice, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	}
 
 	DeviceToMount = IrpSp->Parameters.MountVolume.DeviceObject;
-
+#if 0
 	// ObDereferenceObject(DeviceToMount) from here on.
 	DeviceToMount = IoGetDeviceAttachmentBaseRef(IrpSp->
 	    Parameters.MountVolume.DeviceObject);
-
+#endif
 	if (DeviceToMount->DeviceType != FILE_DEVICE_DISK) {
-		ObDereferenceObject(DeviceToMount);
+//		ObDereferenceObject(DeviceToMount);
 		dprintf("Not FILE_DEVICE_DISK object -- ignoring\n");
 		// Not a disk device, pass it down
 		return (STATUS_INVALID_DEVICE_REQUEST);
@@ -1601,12 +1714,13 @@ zfs_vnop_mount(PDEVICE_OBJECT DiskDevice, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		goto out;
 	}
 
-	status = matched_mount(IrpSp->Parameters.MountVolume.DeviceObject,
+	status = matched_mount(
+	    IrpSp->Parameters.MountVolume.DeviceObject,
 	    DeviceToMount,
 	    dcb, IrpSp->Parameters.MountVolume.Vpb);
 
 out:
-	ObDereferenceObject(DeviceToMount);
+//	ObDereferenceObject(DeviceToMount);
 
 	dprintf("%s: exit: 0x%lx\n", __func__, status);
 	return (status);
@@ -1620,8 +1734,13 @@ mount_add_device(PDEVICE_OBJECT DriverObject,
 	mount_t *zmo = (mount_t *)PhysicalDeviceObject->DeviceExtension;
 	ZFS_DRIVER_EXTENSION(DriverObject, DriverExtension);
 
-	zmo->PhysicalDeviceObject = PhysicalDeviceObject;
+	if (zmo->PhysicalDeviceObject == PhysicalDeviceObject) {
+		// xprintf("Already registered\n");
+		return;
+	}
 
+	zmo->PhysicalDeviceObject = PhysicalDeviceObject;
+#if 1
 	status = IoRegisterDeviceInterface(PhysicalDeviceObject,
 	    &GUID_DEVINTERFACE_VOLUME, NULL,
 	    &zmo->deviceInterfaceName);
@@ -1630,8 +1749,6 @@ mount_add_device(PDEVICE_OBJECT DriverObject,
 	// We can attach to DriverExtension->PhysicalDeviceObject here,
 	// but then most IRP go to busDispatcher() first, then we pass
 	// down to diskDispatcher().
-	// zmo->AttachedDevice = IoAttachDeviceToDeviceStack(AddDeviceObject,
-	// DriverExtension->PhysicalDeviceObject);
 
 	status = IoSetDeviceInterfaceState(&zmo->deviceInterfaceName, TRUE);
 	dprintf("Enable GUID_DEVINTERFACE_VOLUME: 0x%x\n", status);
@@ -1643,13 +1760,17 @@ mount_add_device(PDEVICE_OBJECT DriverObject,
 
 	status = IoSetDeviceInterfaceState(&zmo->fsInterfaceName, TRUE);
 	dprintf("Enable MOUNTDEV_MOUNTED_DEVICE_GUID: 0x%x\n", status);
+#endif
+	dprintf("Releasing mount wait\n");
+	KeSetEvent((PRKEVENT)&zmo->volume_adddevice_event,
+	    SEMAPHORE_INCREMENT, FALSE);
 }
 
 int
 zfs_remove_driveletter(mount_t *zmo)
 {
 	UNICODE_STRING name;
-	PFILE_OBJECT fileObject;
+	PFILE_OBJECT fileObject = NULL;
 	PDEVICE_OBJECT mountmgr;
 	NTSTATUS Status;
 
@@ -1659,7 +1780,8 @@ zfs_remove_driveletter(mount_t *zmo)
 	RtlInitUnicodeString(&name, MOUNTMGR_DEVICE_NAME);
 	Status = IoGetDeviceObjectPointer(&name, FILE_READ_ATTRIBUTES,
 	    &fileObject, &mountmgr);
-
+	if (!NT_SUCCESS(Status))
+		goto out;
 	MOUNTMGR_MOUNT_POINT *mmp = NULL;
 	ULONG mmpsize;
 	MOUNTMGR_MOUNT_POINTS mmps1, *mmps2 = NULL;
@@ -1697,8 +1819,8 @@ out:
 		kmem_free(mmps2, mmps1.Size);
 	if (mmp)
 		kmem_free(mmp, mmpsize);
-
-	ObDereferenceObject(fileObject);
+	if (fileObject)
+		ObDereferenceObject(fileObject);
 	return (Status);
 }
 
@@ -1714,6 +1836,7 @@ unmount_find_volume(void *arg, void *priv)
 	    symlink_name->Length) {
 
 		// Let unmount continue below...
+		dprintf("%s: found, releasing unmount\n", __func__);
 		KeSetEvent((PRKEVENT)&zmo_dcb->volume_removed_event,
 		    SEMAPHORE_INCREMENT, FALSE);
 		return (1);
@@ -1735,7 +1858,9 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 	mount_t *zmo;
 	mount_t *zmo_dcb = NULL;
 	zfsvfs_t *zfsvfs;
+	boolean_t wasmounted = B_FALSE;
 	int error = EBUSY;
+	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
 
 	if (getzfsvfs(zc->zc_name, &zfsvfs) == 0) {
 
@@ -1759,35 +1884,41 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 		vfs_busy(zmo, LK_UPGRADE);
 
 		UNICODE_STRING	name;
-		PFILE_OBJECT	fileObject;
+		PFILE_OBJECT	fileObject = NULL;
 		PDEVICE_OBJECT	mountmgr;
+
+		// Save the parent device
+		zmo_dcb = zmo->parent_device;
 
 		// Query MntMgr for points, just informative
 		RtlInitUnicodeString(&name, MOUNTMGR_DEVICE_NAME);
 		NTSTATUS status = IoGetDeviceObjectPointer(&name,
 		    FILE_READ_ATTRIBUTES, &fileObject, &mountmgr);
 		DECLARE_UNICODE_STRING_SIZE(mountpath, PATH_MAX);
-		status = mountmgr_get_drive_letter(mountmgr,
-		    &zmo->device_name, &mountpath);
-		// We used to loop here and keep deleting anything we find,
-		// but we are only allowed to remove symlinks, anything
-		// else and MountMgr ignores the device.
-		ObDereferenceObject(fileObject);
+		// status = mountmgr_get_drive_letter(mountmgr,
+		//    &zmo->device_name, &mountpath);
+		if (NT_SUCCESS(status)) {
 
-		// Save the parent device
-		zmo_dcb = zmo->parent_device;
+			status = mountmgr_get_mountpoint2(mountmgr,
+			    &zmo_dcb->device_name, NULL, &mountpath, TRUE);
 
+			ObDereferenceObject(fileObject);
+		}
 		// Get ready to wait for the volume removed notification
 		KeInitializeEvent((PRKEVENT)&zmo_dcb->volume_removed_event,
-		    SynchronizationEvent, TRUE);
-
-		dprintf("Set UNMOUNTING\n");
-		vfs_setflags(zmo, MNT_UNMOUNTING);
-		vfs_setflags(zmo_dcb, MNT_UNMOUNTING);
+		    SynchronizationEvent, FALSE);
 
 		if (zmo->root_file)
 			ntstatus = FsRtlNotifyVolumeEvent(zmo->root_file,
 			    FSRTL_VOLUME_DISMOUNT);
+
+		dprintf("Sending volume dismount PnP notification\n");
+		status = IoReportTargetDeviceChangeAsynchronous(
+		    zmo_dcb->PhysicalDeviceObject,
+		    &GUID_IO_VOLUME_DISMOUNT,
+		    NULL,
+		    NULL);
+
 		// Flush volume
 		// rdonly = !spa_writeable(dmu_objset_spa(zfsvfs->z_os));
 
@@ -1803,7 +1934,7 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 
 		if (MOUNTMGR_IS_DRIVE_LETTER(&mountpath)) {
 
-			zfs_remove_driveletter(zmo);
+			zfs_remove_driveletter(zmo_dcb);
 
 		} else {
 			// If mount uses reparsepoint (not driveletter)
@@ -1826,6 +1957,7 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 
 		KIRQL irql;
 		IoAcquireVpbSpinLock(&irql);
+		wasmounted = zmo->vpb->Flags & VPB_MOUNTED;
 		zmo->vpb->Flags &= ~VPB_MOUNTED;
 		// zmo_dcb->vpb->Flags &= ~VPB_MOUNTED;
 		zmo->vpb->Flags |= VPB_DIRECT_WRITES_ALLOWED;
@@ -1841,30 +1973,40 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 		struct vnode *vp = NULL;
 		if (zmo->root_file) {
 			vp = zmo->root_file->FsContext;
-			dprintf("vp %p\n", vp);
-			// this calls volumeclose, but stop any new volumeopen
+			// this calls volume_close, but stop any new volume_open
 			status = volume_close(zmo_dcb->PhysicalDeviceObject,
 			    zmo->root_file);
+			if (vp && VN_HOLD(vp) == 0) {
+				dprintf("vp %p\n", vp);
+				zfs_decouplefileobject(vp, zmo->root_file);
+				vnode_rele(vp);
+				VN_RELE(vp);
+			}
 			ObDereferenceObject(zmo->root_file);
 			zmo->root_file = NULL;
 		}
 
-		IoInvalidateDeviceRelations(zmo_dcb->PhysicalDeviceObject,
-		    RemovalRelations);
+		dprintf("Set UNMOUNTING\n");
+		vfs_setflags(zmo, MNT_UNMOUNTING);
+		vfs_setflags(zmo_dcb, MNT_UNMOUNTING);
 
 		dnlc_purge_vfsp(zmo, 0);
 
 		// Release devices
-		IoDeleteSymbolicLink(&zmo->symlink_name);
+		status = IoDeleteSymbolicLink(&zmo->arc_name);
+		status = IoDeleteSymbolicLink(&zmo->symlink_name);
 
 		// zmo has Volume, and Attached
-		IoSetDeviceInterfaceState(&zmo_dcb->fsInterfaceName, FALSE);
-		IoSetDeviceInterfaceState(&zmo_dcb->deviceInterfaceName, FALSE);
+		status = IoSetDeviceInterfaceState(
+		    &zmo_dcb->fsInterfaceName, FALSE);
+		status = IoSetDeviceInterfaceState(
+		    &zmo_dcb->deviceInterfaceName, FALSE);
+
 		if (zmo->AttachedDevice)
 			IoDetachDevice(zmo->AttachedDevice);
 		zmo->AttachedDevice = NULL;
 
-		IoInvalidateDeviceState(zmo_dcb->FunctionalDeviceObject);
+		// IoInvalidateDeviceState(zmo_dcb->FunctionalDeviceObject);
 
 		/*
 		 * We call mount on DCB, but shouldn't it be VCB? We
@@ -1875,29 +2017,37 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 
 		// wait for volume removal notification
 		LARGE_INTEGER timeout;
-		timeout.QuadPart = -100000 * 10;
+		timeout.QuadPart = -10000000 * 10;
 		status = KeWaitForSingleObject(&zmo_dcb->volume_removed_event,
 		    Executive, KernelMode, TRUE, &timeout);
 		// If we timeout, lets just continue and hope for the best?
 
 		// We must wait for root usecount == 0
-		dprintf("Waiting for volume_opens to be released\n");
+		dprintf("Released. Waiting for volume_opens to be released\n");
 
 		// Make sure all volume_open() has called volume_close()
 		// This could be improved, condvar etc. But it triggers
 		// rarely at the moment.
+		int retry = 0;
+
 		while (zmo_dcb->volume_opens > 0) {
 			delay(hz >> 2); // Fixme
+			if (retry++ > 10) break;
 		}
 
-		dprintf("Waiting for mount root to be released\n");
+		dprintf("Done. Waiting for mount root to be released\n");
 
 		// Then make sure we aren't still in the middle of
 		// a vmode_create() by grabbing zfs_enter() lock.
 		ZFS_TEARDOWN_ENTER_WRITE(zfsvfs, FTAG);
-		while (vp && vp->v_iocount > 0) {
-			delay(hz >> 2); // Fixme
+		if (vp != NULL) {
+			retry = 0;
+			while (vp->v_iocount > 0 || vp->v_usecount > 0) {
+				delay(hz >> 2); // Fixme, condvar
+				if (retry++ > 10) break;
+			}
 		}
+
 		// Unix would handle this at unmount, effectively dealing
 		// with the markroot vnode. So we remove the ROOT part so
 		// it can be recycled. vflush() should handle it.
@@ -1908,6 +2058,12 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 		dprintf("%s: calling zfs_vfs_unmount\n", __func__);
 		error = zfs_vfs_unmount(zmo, 0, NULL);
 		dprintf("%s: zfs_vfs_unmount %d\n", __func__, error);
+
+		IoAcquireVpbSpinLock(&irql);
+		if (wasmounted)
+			zmo->vpb->ReferenceCount -= 1;
+		zmo->vpb->DeviceObject = NULL;
+		IoReleaseVpbSpinLock(irql);
 
 		// dcb has physical and functional
 		// There should also be a diskDevice above us to release.
@@ -1922,36 +2078,34 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 
 			// Release strings in zmo, then zmo w/ IoDeleteDevice()
 			zfs_release_mount(zmo_dcb);
+			zmo_dcb->FunctionalDeviceObject->Vpb = NULL;
 
 			// Physical and Functional are same for DCB
 			if (zmo_dcb->PhysicalDeviceObject !=
-			    zmo_dcb->FunctionalDeviceObject)
+			    zmo_dcb->FunctionalDeviceObject) {
 				IoDeleteDevice(zmo_dcb->FunctionalDeviceObject);
-
+			}
+#if 1
 			if (zmo_dcb->PhysicalDeviceObject) {
 				zmo_dcb->PhysicalDeviceObject->Vpb = NULL;
 				IoDeleteDevice(zmo_dcb->PhysicalDeviceObject);
 			}
-
+#endif
 			zmo_dcb = NULL;
 		}
-
-		IoAcquireVpbSpinLock(&irql);
-		zmo->vpb->ReferenceCount--;
-		zmo->vpb->DeviceObject = NULL;
-		IoReleaseVpbSpinLock(irql);
 
 		// Release strings in zmo, then zmo by calling IoDeleteDevice()
 		if (zmo->VolumeDeviceObject) {
 			zfs_release_mount(zmo);
 			zmo->VolumeDeviceObject->Vpb = NULL;
+			IoDetachDevice(zmo->VolumeDeviceObject);
 			IoDeleteDevice(zmo->VolumeDeviceObject);
 			zmo = NULL;
 		}
 
-		ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
+		// Make Windows recheck what child devices are left.
 		IoInvalidateDeviceRelations(
-		    DriverExtension->PhysicalDeviceObject, RemovalRelations);
+		    DriverExtension->PhysicalDeviceObject, BusRelations);
 
 		error = 0;
 

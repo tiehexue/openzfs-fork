@@ -124,8 +124,11 @@ void ZFSinCachePerfEnumerate(PCW_MASK_INFORMATION EnumerateInstances);
 #undef INITGUID
 #endif
 
+DEFINE_GUID(OpenZFSBusInterface, 0x4F70656E, 0x5A46, 0x5357,
+    0x69, 0x6E, 0x31, 0x39, 0x38, 0x35, 0x7a, 0x12);
+
 static void *notification_entry = NULL, *notification_entry2 = NULL,
-    *notification_entry3 = NULL;
+	*notification_entry3 = NULL;
 
 extern int zcommon_init(void);
 
@@ -985,7 +988,8 @@ zfs_unload_stage_1(void)
 	dprintf("Starting Driver Unload stage 1...\n");
 
 	if (DriverExtension->FunctionalDeviceObject) {
-		mount_t *zmo_bus = DriverExtension->FunctionalDeviceObject->DeviceExtension;
+		mount_t *zmo_bus =
+		    DriverExtension->FunctionalDeviceObject->DeviceExtension;
 
 		// REMOVE_DEVICE already detached these.
 		zmo_bus->AttachedDevice = NULL;
@@ -1006,10 +1010,11 @@ zfs_unload_stage_1(void)
 	// Remove the ioctl node for userland
 	if (DriverExtension->ioctlDeviceObject) {
 		mutex_enter(&zfsdev_state_lock);
-		mount_t *dgl = DriverExtension->ioctlDeviceObject->DeviceExtension;
+		mount_t *dgl =
+		    DriverExtension->ioctlDeviceObject->DeviceExtension;
 		IoDeleteSymbolicLink(&dgl->symlink_name);
 		IoDeleteDevice(DriverExtension->ioctlDeviceObject);
-		DriverExtension->ioctlDeviceObject = NULL; // Use to signal we unloaded
+		DriverExtension->ioctlDeviceObject = NULL;
 		mutex_exit(&zfsdev_state_lock);
 	}
 
@@ -1041,6 +1046,10 @@ zfs_ioc_unregister_fs(void)
 		    zfs_module_busy);
 		return (zfs_module_busy);
 	}
+
+	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
+	dprintf("%s: unregistering filesystem\n", __func__);
+	DriverExtension->Unload_Module = TRUE;
 
 	return (0);
 }
@@ -1153,6 +1162,8 @@ OpenZFS_AddDevice(
 	    L"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)"
 	    "(A;;GRGWGX;;;WD)(A;;GRGX;;;RC)");
 	// Or use &SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RW_RES_R
+	dprintf("%s(PhysicalDeviceObject %p)\n",
+	    __func__, PhysicalDeviceObject);
 
 	if (PhysicalDeviceObject == NULL) {
 		return (STATUS_NO_MORE_ENTRIES);
@@ -1194,17 +1205,34 @@ OpenZFS_AddDevice(
 		zmo_bus->FunctionalDeviceObject =
 		    DriverExtension->FunctionalDeviceObject;
 		zmo_bus->PhysicalDeviceObject = PhysicalDeviceObject;
+#if 0
+		status = IoReportDetectedDevice(DriverObject,
+		    InterfaceTypeUndefined, 0xFFFFFFFF, 0xFFFFFFFF, NULL, NULL,
+		    0, &zmo_bus->PhysicalDeviceObject);
+#endif
+		status =
+		    IoRegisterDeviceInterface(zmo_bus->PhysicalDeviceObject,
+		    &OpenZFSBusInterface, NULL, &zmo_bus->bus_name);
+		if (!NT_SUCCESS(status))
+			dprintf("Failed to register 0x%x\n", status);
 
-		status = IoReportDetectedDevice(DriverObject, InterfaceTypeUndefined, 0xFFFFFFFF, 0xFFFFFFFF,
-		    NULL, NULL, 0, &zmo_bus->PhysicalDeviceObject);
 		zmo_bus->AttachedDevice = IoAttachDeviceToDeviceStack(
-		    DriverExtension->FunctionalDeviceObject, zmo_bus->PhysicalDeviceObject);
+		    DriverExtension->FunctionalDeviceObject,
+		    zmo_bus->PhysicalDeviceObject);
 		DriverExtension->LowerDeviceObject = zmo_bus->AttachedDevice;
 		zmo_bus->PhysicalDeviceObject->Flags &=
 		    ~DO_DEVICE_INITIALIZING;
 
 		DriverExtension->FunctionalDeviceObject->Flags &=
 		    ~DO_DEVICE_INITIALIZING;
+
+		status = IoSetDeviceInterfaceState(&zmo_bus->bus_name, TRUE);
+		if (!NT_SUCCESS(status))
+			dprintf("IoSetDeviceInterfaceState %08lx\n", status);
+
+		IoInvalidateDeviceRelations(zmo_bus->PhysicalDeviceObject,
+		    BusRelations);
+
 
 		RtlInitUnicodeString(&ntUnicodeString, ZFS_DEV_KERNEL);
 		status = IoCreateDeviceSecure(
@@ -1253,9 +1281,6 @@ OpenZFS_AddDevice(
 
 		return (STATUS_SUCCESS);
 	}
-
-	dprintf("%s(PhysicalDeviceObject %p)\n",
-	    __func__, PhysicalDeviceObject);
 
 	// If we have created a new mount, that DeviceObject should
 	// be PhysicalDeviceObject here, and should exist in the list

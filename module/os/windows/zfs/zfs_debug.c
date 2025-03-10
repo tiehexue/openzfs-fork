@@ -208,7 +208,7 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 {
 	int size, i;
 	va_list adx;
-	char *buf, *nl;
+	char buf[1024], *nl;
 	char *prefix = (dprint) ? "dprintf: " : "";
 	const char *newfile;
 
@@ -234,7 +234,7 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	} else {
 		newfile = file;
 	}
-
+#if 0
 	va_start(adx, fmt);
 	size = vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
@@ -243,13 +243,14 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	    func);
 
 	size++; /* null byte in the "buf" string */
-
 	/*
 	 * There is one byte of string in sizeof (zfs_dbgmsg_t), used
 	 * for the terminating null.
 	 */
 	buf = kmem_alloc(size, KM_SLEEP);
+#endif
 	int roger = 0;
+	size = sizeof (buf) - 1;
 
 	va_start(adx, fmt);
 	i = snprintf(buf, size + 1, "%s%s:%d:%s(): ",
@@ -268,12 +269,12 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 
 	DTRACE_PROBE1(zfs__dbgmsg, char *, zdm->zdm_msg);
 
-	__zfs_dbgmsg(buf);
+	// __zfs_dbgmsg(buf);
 
 	/* Also emit string to log/console */
 	printBuffer("%s\n", buf);
 
-	kmem_free(buf, size);
+	// kmem_free(buf, size);
 }
 
 #else

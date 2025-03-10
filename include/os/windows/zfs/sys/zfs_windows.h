@@ -151,8 +151,14 @@ extern NTSTATUS pnp_query_bus_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp);
 extern NTSTATUS pnp_device_usage_notification(PDEVICE_OBJECT DeviceObject,
     PIRP Irp, PIO_STACK_LOCATION IrpSp);
+extern NTSTATUS pnp_query_device_text(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp);
+
 extern int zfs_init_cache(FILE_OBJECT *fo, struct vnode *vp,
     CC_FILE_SIZES *ccfs);
+extern void zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *,
+    uint64_t size, zfs_ccb_t **ccb, uint64_t alloc, ACCESS_MASK, char *stream);
+extern void zfs_decouplefileobject(vnode_t *vp, FILE_OBJECT *fileobject);
 
 /* zfs_vnop_windows_lib.h */
 extern int	AsciiStringToUnicodeString(char *in, PUNICODE_STRING out);

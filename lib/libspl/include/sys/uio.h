@@ -87,7 +87,7 @@ typedef struct zfs_uio {
 static inline boolean_t
 zfs_dio_page_aligned(void *buf)
 {
-	return ((((unsigned long)(buf) & (PAGESIZE - 1)) == 0) ?
+	return ((((unsigned long long)(buf) & (PAGESIZE - 1)) == 0) ?
 	    B_TRUE : B_FALSE);
 }
 

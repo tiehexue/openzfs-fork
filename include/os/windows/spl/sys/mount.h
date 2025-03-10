@@ -99,6 +99,7 @@ struct mount
 {
 	FSD_IDENTIFIER_TYPE type;
 	ULONG size;
+	const unsigned char *ascii_name;
 	void *fsprivate;
 	void *parent_device; // Only set so vcd can find dcb
 	uuid_t rawuuid;
@@ -129,7 +130,8 @@ struct mount
 	uint64_t mountflags;
 
 	KEVENT volume_removed_event;
-	KEVENT volume_mounted_event;
+	KEVENT volume_adddevice_event; // Until AddDevice is called
+	KEVENT volume_mounted_event; // Until full mount is done.
 
 	// Linked list of mounts
 	list_node_t mount_node;

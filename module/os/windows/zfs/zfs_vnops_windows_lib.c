@@ -1207,8 +1207,7 @@ zfs_readdir_emitdir(zfsvfs_t *zfsvfs, const char *name, emitdir_ptr_t *ctx,
 
 	// Release the zp
 	if (get_zp == 0 && tzp != NULL && ZTOV(tzp) != NULL) {
-		if (ZTOV(tzp) != NULL)
-			VN_RELE(ZTOV(tzp));
+		VN_RELE(ZTOV(tzp));
 	}
 
 	// If know we can't fit struct, just leave
@@ -2139,6 +2138,7 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 	znode_t *dzp = NULL;
 	uint64_t parent;
 	zfsvfs_t *zfsvfs;
+	mount_t *zmo;
 	char name[ZAP_MAXNAMELEN];
 
 	// No output? nothing to do
@@ -2150,6 +2150,7 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 
 	zfsvfs = start_zp->z_zfsvfs;
 	zp = start_zp;
+	zmo = zfsvfs->z_vfs;
 
 	VN_HOLD(ZTOV(zp));
 
@@ -2193,9 +2194,14 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 		// dzp held from here.
 
 		// Find name
-		if (zp->z_id == zfsvfs->z_root)
-			strlcpy(name, "", MAXPATHLEN);
-		else if (zp->z_id == ZFSCTL_INO_ROOT)
+		if (zp->z_id == zfsvfs->z_root) {
+#if 0
+			if (zmo->mounted_on)
+				strlcpy(name, zmo->mounted_on, MAXPATHLEN);
+			else
+#endif
+				strlcpy(name, "", MAXPATHLEN);
+		} else if (zp->z_id == ZFSCTL_INO_ROOT)
 			strlcpy(name, ZFS_CTLDIR_NAME, MAXPATHLEN);
 		else if (zp->z_id == ZFSCTL_INO_SNAPDIR)
 			strlcpy(name, ZFS_SNAPDIR_NAME, MAXPATHLEN);
@@ -2371,6 +2377,9 @@ zfs_send_notify_stream(zfsvfs_t *zfsvfs, char *name, int nameoffset,
 	length = strlen(name);
 
 	if (nameoffset > length)
+		return;
+
+	if (!zmo->NotifySync)
 		return;
 
 	RtlUTF8ToUnicodeN(NULL, 0, &allocateBytes, name, length);
@@ -5521,8 +5530,10 @@ QueryCapabilities(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	DeviceCapabilities->EjectSupported = FALSE;
 	DeviceCapabilities->Removable = TRUE;
 	DeviceCapabilities->DockDevice = FALSE;
-	DeviceCapabilities->UniqueID = FALSE;
-	DeviceCapabilities->SilentInstall = FALSE;
+	// DeviceCapabilities->UniqueID = FALSE;
+	// DeviceCapabilities->SilentInstall = FALSE;
+	DeviceCapabilities->UniqueID = TRUE;
+	DeviceCapabilities->SilentInstall = TRUE;
 	DeviceCapabilities->RawDeviceOK = FALSE;
 	DeviceCapabilities->SurpriseRemovalOK = FALSE;
 	DeviceCapabilities->WakeFromD0 = FALSE;
@@ -5557,6 +5568,7 @@ QueryCapabilities(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	return (STATUS_SUCCESS);
 }
 
+#if 0
 NTSTATUS
 SendBusRelationsRequest(PDEVICE_OBJECT STOR_DeviceObject,
     PDEVICE_RELATIONS *StorportRelations)
@@ -5608,6 +5620,7 @@ SendBusRelationsRequest(PDEVICE_OBJECT STOR_DeviceObject,
 
 	return (status);
 }
+#endif
 
 NTSTATUS
 QueryDeviceRelations(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
@@ -5659,44 +5672,15 @@ QueryDeviceRelations(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 	}
 	case BusRelations:
 	{
-		int count, extra = 0;
+		int count;
 		PDEVICE_RELATIONS StorportRelations = NULL;
 
 		// Grab count here, and use only it, since list can
 		// change as we process this function.
 		count = vfs_mount_count();
 
-		// If we call Storport first, they might already have a
-		// list from them so sadly we need to merge.
-		// We used to just IoCopyCurrentIrpStackLocationToNext()
-		// and call onwards, but it can run out of stack space,
-		// so now we do a whole new request.
-#if 0
-		if (windows_zvol_enabled) {
-			dprintf("Calling Storport first\n");
-			Status = SendBusRelationsRequest(
-			    DriverExtension->StorportDeviceObject,
-			    &StorportRelations);
-			if (NT_SUCCESS(Status)) {
-
-				if (StorportRelations &&
-				    StorportRelations->Count > 0) {
-					extra = StorportRelations->Count;
-					dprintf("storport extra %d\n",
-					    extra);
-				}
-			}
-		}
-#endif
-#if 0
-		if (count == 0 && extra == 0) {
-			Status = STATUS_NO_SUCH_DEVICE; // VSS
-			break;
-		}
-#endif
-
 		DeviceRelations = ExAllocatePool(PagedPool,
-		    offsetof(DEVICE_RELATIONS, Objects[count + extra]));
+		    offsetof(DEVICE_RELATIONS, Objects[count]));
 
 		if (DeviceRelations == NULL) {
 			if (StorportRelations) // Count can be 0.
@@ -5706,7 +5690,7 @@ QueryDeviceRelations(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 
 		DeviceRelations->Count = 0;
 
-		if (count == 0 && extra == 0)
+		if (count == 0)
 			goto out;
 
 		vfs_mount_setarray(DeviceRelations->Objects, count);
@@ -5714,27 +5698,22 @@ QueryDeviceRelations(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		// Loop array, and grab reference and increment if valid.
 		// linked list will only leave NULL at end, not start/middle.
 		// list is of mounts, so fetch DeviceObjects.
+		// ChatGPT says returning PDO here is more proper, but I can not
+		// get AddDevice() to be called if I do. Returning FDO works.
 		for (int i = 0; i < count; i++) {
 			mount_t *mount;
 			mount = DeviceRelations->Objects[i];
 			DeviceRelations->Objects[i] = NULL;
 			if (mount != NULL && mount->FunctionalDeviceObject) {
+				dprintf("mount %p : FDO %p\n",
+				    mount, mount->FunctionalDeviceObject);
 				DeviceRelations->Objects[
 				    DeviceRelations->Count] =
 				    mount->FunctionalDeviceObject;
+//				    mount->PhysicalDeviceObject;
 				ObReferenceObject(
 				    DeviceRelations->Objects[
 				    DeviceRelations->Count]);
-				DeviceRelations->Count++;
-			}
-		}
-
-		// Add Storport to this baby, they already got references
-		if (extra) {
-			for (int i = 0; i < StorportRelations->Count; i++) {
-				DeviceRelations->Objects[
-				    DeviceRelations->Count] =
-				    StorportRelations->Objects[i];
 				DeviceRelations->Count++;
 			}
 		}
@@ -5758,6 +5737,45 @@ out:
 
 	return (Status);
 }
+
+NTSTATUS
+pnp_query_device_text(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	PWCHAR deviceText = NULL;
+	ULONG length;
+	NTSTATUS status = STATUS_NOT_SUPPORTED;
+
+	switch (IrpSp->Parameters.QueryDeviceText.DeviceTextType) {
+	case DeviceTextDescription:
+		deviceText = L"ZFS Volume";
+		break;
+	case DeviceTextLocationInformation:
+		deviceText = L"ZFS Virtual Disk";
+		break;
+	default:
+		break;
+	}
+
+	if (deviceText) {
+		length = (ULONG)(wcslen(deviceText) + 1) * sizeof (WCHAR);
+		void *addr;
+
+		addr = (ULONG_PTR)ExAllocatePoolWithTag(PagedPool, length,
+		    'txtZ');
+		if (addr) {
+			RtlCopyMemory(addr, deviceText, length);
+			Irp->IoStatus.Information = (ULONG_PTR)addr;
+			dprintf("Replying with '%S'\n", addr);
+			status = STATUS_SUCCESS;
+		} else {
+			status = STATUS_INSUFFICIENT_RESOURCES;
+		}
+	}
+
+	return (status);
+}
+
 
 NTSTATUS
 ioctl_get_gpt_attributes(PDEVICE_OBJECT DeviceObject, PIRP Irp,
