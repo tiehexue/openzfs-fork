@@ -17,7 +17,7 @@
 # This script should probably be made less "lundman only".
 
 # No args?
-CERT=05855aef9ca26ecca0473d2563bd0497b47e6f4d
+CERT=60FCE297ADEBD3D557CFB183BAD47A0D62CB30E9
 
 WDK_BASE_PATH="/c/Program Files (x86)/Windows Kits/10/bin"
 LATEST_VERSION=$(ls "$WDK_BASE_PATH" | grep "..\..\......\.." | tail -n 1)
