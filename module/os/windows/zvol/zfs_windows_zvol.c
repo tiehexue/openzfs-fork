@@ -31,6 +31,10 @@
 #include <sys/zfs_context.h>
 #include <sys/wzvol.h>
 
+#define	dprintf(...) 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
+
+#include <sys/openzvol.h>
+
 extern PDRIVER_OBJECT WIN_DriverObject;
 static pHW_HBA_EXT STOR_HBAExt = NULL;
 static wzvolDriverInfo STOR_wzvolDriverInfo;
@@ -39,68 +43,13 @@ static uint64_t windows_zvol_enabled = 1;
 ZFS_MODULE_PARAM(, windows_, zvol_enabled, U64, ZMOD_RW,
 	"Windows: enable zvol");
 
-NTSYSCALLAPI NTSTATUS NTAPI ZwQuerySystemInformation(
-    ULONG SystemInformationClass,
-    PVOID SystemInformation,
-    ULONG SystemInformationLength,
-    PULONG ReturnLength
-);
-
-typedef struct _SYSTEM_MODULE {
-	ULONG	Reserved[2];
-#ifdef _WIN64
-	ULONG Unknown3;
-	ULONG Unknown4;
-#endif
-	PVOID	Base;
-	ULONG	Size;
-	ULONG	Flags;
-	USHORT	Index;
-	USHORT	Unknown;
-	USHORT	LoadCount;
-	USHORT	ModuleNameOffset;
-	CHAR	ImageName[256];
-} SYSTEM_MODULE, *PSYSTEM_MODULE;
-
-typedef struct _SYSTEM_MODULE_INFORMATION {
-	ULONG	ModulesCount;
-	SYSTEM_MODULE	Modules[1];
-} SYSTEM_MODULE_INFORMATION, *PSYSTEM_MODULE_INFORMATION;
-
-#define	SystemModuleInformation 11
-
 static void
 ListLoadedDrivers(void)
 {
 	ULONG bufferLength = 0;
 	boolean_t skipLoad = FALSE;
 
-	ZwQuerySystemInformation(SystemModuleInformation, NULL, 0,
-	    &bufferLength);
-
-	PVOID buffer = ExAllocatePoolWithTag(NonPagedPoolNx, bufferLength,
-	    'sysm');
-
-	if (buffer == NULL)
-		return;
-
-	if (NT_SUCCESS(ZwQuerySystemInformation(SystemModuleInformation,
-	    buffer, bufferLength, &bufferLength))) {
-		PSYSTEM_MODULE_INFORMATION moduleInformation =
-		    (PSYSTEM_MODULE_INFORMATION)buffer;
-		for (ULONG i = 0; i < moduleInformation->ModulesCount; ++i) {
-			dprintf("Driver: %s\n",
-			    moduleInformation->Modules[i].ImageName);
-
-			if (strncmp("\\SystemRoot\\system32\\ambakdrv.sys",
-			    moduleInformation->Modules[i].ImageName,
-			    sizeof (moduleInformation->Modules[i].ImageName))
-			    == 0)
-				skipLoad = TRUE;
-		}
-	}
-
-	ExFreePoolWithTag(buffer, 'sysm');
+	skipLoad = FindDriver("\\SystemRoot\\system32\\ambakdrv.sys");
 
 	if (!skipLoad)
 		return;
@@ -117,7 +66,6 @@ ListLoadedDrivers(void)
 		    "and Aomei ambakdrv.sys installed.\n");
 		xprintf("Forcing ZVOL despite ambakdrv.sys\n");
 	}
-
 }
 
 int

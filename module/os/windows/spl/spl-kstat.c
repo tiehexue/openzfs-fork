@@ -2238,8 +2238,6 @@ int spl_kstat_chain_id(PDEVICE_OBJECT DiskDevice, PIRP Irp,
 	    sizeof (ksp));
 	ddi_copyout(&ksp, IrpSp->Parameters.DeviceIoControl.Type3InputBuffer,
 	    sizeof (ksp), 0);
-	dprintf("%s:%d: returning kstat_chain_id %d\n",
-	    __func__, __LINE__, kstat_chain_id);
 	return (0);
 }
 

@@ -1169,12 +1169,16 @@ zfs_windows_mount(zfs_cmd_t *zc)
 	snprintf(zc->zc_value, sizeof (zc->zc_value),
 	    "\\DosDevices\\Global\\Volume{%s}", uuid_a);
 
+
+//	DriverExtension->LowerDeviceObject = IoAttachDeviceToDeviceStack(
+//	    diskDeviceObject, DriverExtension->PhysicalDeviceObject);
+
 	IoInvalidateDeviceRelations(DriverExtension->PhysicalDeviceObject,
 	    BusRelations);
 
 	// Free diskDeviceName
 	FreeUnicodeString(&diskDeviceName);
-
+	
 	/*
 	 * Here the rest of the mount will happen async, but
 	 * if we return now, userland will carry on and mount the

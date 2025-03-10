@@ -40,6 +40,8 @@
 #include <sys/zvol_impl.h>
 #include <sys/zvol_os.h>
 
+#include <sys/openzvol.h>
+
 static uint32_t zvol_major = ZVOL_MAJOR;
 
 unsigned int zvol_request_sync = 0;
@@ -49,10 +51,6 @@ unsigned int zvol_threads = 32;
 
 taskq_t *zvol_taskq;
 
-extern void wzvol_clear_targetid(uint8_t targetid, uint8_t lun,
-    zvol_state_t *zv);
-extern void wzvol_announce_buschange(void);
-extern int wzvol_assign_targetid(zvol_state_t *zv);
 extern list_t zvol_state_list;
 
 _Atomic uint64_t spl_lowest_zvol_stack_remaining = 0;
@@ -69,6 +67,246 @@ typedef struct zv_request {
 #define	ZVOL_LOCK_HELD		(1<<0)
 #define	ZVOL_LOCK_SPA		(1<<1)
 #define	ZVOL_LOCK_SUSPEND	(1<<2)
+
+// After we register with openzvol.sys, we hold a reference to the fileObject
+// until deregister is called. So we do not need to reopen it to issue IRPs.
+// we can then use openzvol_deviceObject as a test for registered or not.
+static PFILE_OBJECT openzvol_fileObject = NULL;
+static PDEVICE_OBJECT openzvol_deviceObject = NULL;
+
+static VOID register_with_openzvol(void)
+{
+	NTSTATUS status;
+	UNICODE_STRING deviceName;
+
+	RtlInitUnicodeString(&deviceName, L"\\Device\\OpenZVOL");
+
+	dprintf("%s\n", __func__);
+
+	// Get device object for OpenZVOL
+	status = IoGetDeviceObjectPointer(&deviceName, FILE_READ_DATA, &openzvol_fileObject, &openzvol_deviceObject);
+
+	if (NT_SUCCESS(status)) {
+		PIRP irp;
+		IO_STATUS_BLOCK ioStatus;
+		KEVENT event;
+		NTSTATUS status;
+		zvol_api_t *api;
+
+		api = ExAllocatePool(NonPagedPool, sizeof (zvol_api_t));
+		if (!api) {
+			dprintf("ZFS: Failed to allocate memory\n");
+			return;
+		}
+
+		api->zvol_os_read_zv = zvol_os_read_zv;
+		api->zvol_os_write_zv = zvol_os_write_zv;
+		api->zvol_os_unmap = zvol_os_unmap;
+
+		KeInitializeEvent(&event, NotificationEvent, FALSE);
+		irp = IoBuildDeviceIoControlRequest(OPENZVOL_REGISTER, openzvol_deviceObject, api, sizeof (zvol_api_t),
+		    NULL, 0, FALSE, &event, &ioStatus);
+		if (!irp) {
+			dprintf("ZFS: Failed to create IRP\n");
+			return;
+		}
+
+		status = IoCallDriver(openzvol_deviceObject, irp);
+		if (status == STATUS_PENDING) {
+			KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+			status = ioStatus.Status;
+		}
+
+		if (!NT_SUCCESS(status)) {
+			dprintf("ZFS: Failed to register with OpenZVOL %08x\n", status);
+		}
+
+		// Do not release it here. Look in deregister()
+		// ObDereferenceObject(openzvol_fileObject);
+		ExFreePool(api);
+
+	}
+}
+
+static boolean_t zvol_os_wait_openzvol_exit = B_TRUE;
+
+static void
+zvol_os_wait_openzvol(void *arg)
+{
+	UNICODE_STRING deviceName;
+	NTSTATUS status;
+
+	dprintf("%s thread start\n", __func__);
+
+	RtlInitUnicodeString(&deviceName, L"\\Device\\OpenZVOL");
+
+	while (!zvol_os_wait_openzvol_exit) {
+
+		PFILE_OBJECT fileObject;
+		PDEVICE_OBJECT deviceObject;
+
+		status = IoGetDeviceObjectPointer(&deviceName, FILE_READ_DATA, &fileObject, &deviceObject);
+		if (NT_SUCCESS(status)) {
+			ObDereferenceObject(fileObject);
+			register_with_openzvol();
+			break;
+		}
+
+		delay(hz * 3);
+	}
+	dprintf("%s thread exit\n", __func__);
+}
+
+static void
+zvol_os_assign_targetid(zvol_state_t *zv)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	if (!openzvol_deviceObject)
+		return;
+
+	dprintf("%s\n", __func__);
+
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+	irp = IoBuildDeviceIoControlRequest(OPENZVOL_ASSIGN_TARGETID, openzvol_deviceObject,
+	    &zv, sizeof (zvol_state_t *), NULL, 0, FALSE, &event, &ioStatus);
+	if (!irp) {
+		dprintf("ZFS: Failed to create IRP\n");
+		return;
+	}
+
+	status = IoCallDriver(openzvol_deviceObject, irp);
+	if (status == STATUS_PENDING) {
+		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+		status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: Failed to assign_targetid with OpenZVOL %08x\n", __func__, status);
+	}
+}
+
+static void
+zvol_os_clear_targetid(zvol_state_t *zv)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	if (!openzvol_deviceObject)
+		return;
+
+	dprintf("%s\n", __func__);
+
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+	irp = IoBuildDeviceIoControlRequest(OPENZVOL_CLEAR_TARGETID, openzvol_deviceObject,
+	    &zv, sizeof (zvol_state_t *), NULL, 0, FALSE, &event, &ioStatus);
+	if (!irp) {
+		dprintf("ZFS: Failed to create IRP\n");
+		return;
+	}
+
+	status = IoCallDriver(openzvol_deviceObject, irp);
+	if (status == STATUS_PENDING) {
+		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+		status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: Failed to clear_targetid with OpenZVOL %08x\n", __func__, status);
+	}
+}
+
+static void
+zvol_os_announce_buschange(void)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	if (!openzvol_deviceObject)
+		return;
+
+	dprintf("%s\n", __func__);
+
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+	irp = IoBuildDeviceIoControlRequest(OPENZVOL_ANNOUNCE_BUSCHANGE, openzvol_deviceObject,
+	    NULL, 0, NULL, 0, FALSE, &event, &ioStatus);
+	if (!irp) {
+		dprintf("ZFS: Failed to create IRP\n");
+		return;
+	}
+
+	status = IoCallDriver(openzvol_deviceObject, irp);
+	if (status == STATUS_PENDING) {
+		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+		status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: Failed to announce_buschange with OpenZVOL %08x\n", __func__, status);
+	}
+}
+
+/*
+ * Attempt to register with the OpenZVOL module,
+ * either now if loaded, or later when it loads.
+ */
+int
+zvol_os_register_module(void)
+{
+	boolean_t found;
+
+	zvol_os_wait_openzvol_exit = B_FALSE;
+
+	taskq_dispatch(system_taskq, zvol_os_wait_openzvol, NULL,
+	    TQ_SLEEP);
+
+	return(0);
+}
+
+void
+zvol_os_deregister_module(void)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	zvol_os_wait_openzvol_exit = B_TRUE;
+
+	if (!openzvol_deviceObject)
+		return;
+
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+	irp = IoBuildDeviceIoControlRequest(OPENZVOL_DEREGISTER, openzvol_deviceObject, NULL, 0,
+	    NULL, 0, FALSE, &event, &ioStatus);
+	if (!irp) {
+		dprintf("ZFS: Failed to create IRP\n");
+		return;
+	}
+
+	status = IoCallDriver(openzvol_deviceObject, irp);
+	if (status == STATUS_PENDING) {
+		KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+		status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: Failed to deregister with OpenZVOL %08x\n", __func__, status);
+	}
+
+	// Finally release the fileObject, openzvol.sys can unload now.
+	ObDereferenceObject(openzvol_fileObject);
+
+	openzvol_fileObject = NULL;
+	openzvol_deviceObject = NULL;
+}
 
 static void
 zvol_os_spawn_cb(void *param)
@@ -655,8 +893,8 @@ zvol_os_attach(const char *name)
 		    FREAD : FWRITE, 0, NULL); // readonly?
 		// Assign new TargetId and Lun
 		if (error == 0) {
-			wzvol_assign_targetid(zv);
-			wzvol_announce_buschange();
+			zvol_os_assign_targetid(zv);
+			zvol_os_announce_buschange();
 		}
 	}
 }
@@ -665,8 +903,7 @@ void
 zvol_os_detach_zv(zvol_state_t *zv)
 {
 	if (zv != NULL) {
-		wzvol_clear_targetid(zv->zv_zso->zso_target_id,
-		    zv->zv_zso->zso_lun_id, zv);
+		zvol_os_clear_targetid(zv);
 		/* Last close needs suspect lock, give it a try */
 		if (zv->zv_open_count == 1) {
 			if (rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
@@ -675,7 +912,7 @@ zvol_os_detach_zv(zvol_state_t *zv)
 				rw_exit(&zv->zv_suspend_lock);
 			}
 		}
-		wzvol_announce_buschange();
+		zvol_os_announce_buschange();
 	}
 }
 
@@ -691,7 +928,7 @@ zvol_os_detach(char *name)
 	if (zv != NULL) {
 		zvol_os_detach_zv(zv);
 		mutex_exit(&zv->zv_state_lock);
-		wzvol_announce_buschange();
+		zvol_os_announce_buschange();
 	}
 }
 

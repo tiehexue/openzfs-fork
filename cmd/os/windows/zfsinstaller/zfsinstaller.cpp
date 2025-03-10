@@ -21,6 +21,7 @@
  */
 /*
  * Copyright (c) 2018 Julian Heuking <J.Heuking@beckhoff.com>
+ * Copyright (c) 2025 Jorgen Lundman <lundman@lundman.net>
  */
 
 extern "C" {
@@ -34,6 +35,16 @@ extern int optind;
 // kernel header'
 // #include <sys/zfs_ioctl_compat.h>
 #define	ZFSIOCTL_BASE 0x800
+
+#include <strsafe.h>
+#include <cfgmgr32.h>
+#include <newdev.h>
+
+#define	ZFS_ROOTDEV "ROOT\\OpenZFS"
+#define	ZVOL_ROOTDEV "ROOT\\OpenZVOL"
+// DevCon uses LoadLib() - but lets just static link
+#pragma comment(lib, "Newdev.lib")
+
 }
 
 #include "zfsinstaller.h"
@@ -50,7 +61,7 @@ namespace fs = std::experimental::filesystem;
 //    zfsinstaller install [inf] [installFolder]
 //			defaults to something like %ProgramFiles%\ZFS)
 //    zfsinstaller uninstall [inf] (could default to something
-//			like %ProgramFiles%\ZFS\ZFSin.inf)
+//			like %ProgramFiles%\ZFS\OpenZFS.inf)
 //    zfsinstaller trace [-f Flags] [-l Levels] [-s SizeOfETLInMB]
 //			[-p AbsolutePathOfETL]
 //    zfsinstaller trace -d
@@ -192,6 +203,7 @@ hex_modify(std::string& hex)
 std::string get_cwd() {
 	CHAR cwd_path[MAX_PATH_LEN] = { 0 };
 	DWORD len = GetCurrentDirectoryA(MAX_PATH_LEN, cwd_path);
+	(void)len;
 	return (std::string(cwd_path));
 }
 
@@ -320,8 +332,9 @@ zfs_log_session_create(int argc, char **argv)
 	return (0);
 }
 
-int perf_counters(char *inf_path, int type) {
-	int error = 0;
+int
+perf_counters(char *inf_path, int type)
+{
 	fs::path path = std::string(inf_path);
 	std::string final_path;
 
@@ -353,12 +366,16 @@ int perf_counters(char *inf_path, int type) {
 	return (system(command));
 }
 
-int perf_counters_install(char *inf_path) {
+int
+perf_counters_install(char *inf_path)
+{
 	return (perf_counters(inf_path, MAN_INSTALL));
 }
 
 
-int perf_counters_uninstall(char *inf_path) {
+int
+perf_counters_uninstall(char *inf_path)
+{
 	return (perf_counters(inf_path, MAN_UNINSTALL));
 }
 
@@ -377,8 +394,9 @@ main(int argc, char *argv[])
 	}
 
 	if (strcmp(argv[1], "install") == 0) {
-		if (argc == 3) {
+		if (argc == 4) {
 			zfs_install(argv[2]);
+			zvol_install(argv[3]);
 			fprintf(stderr, "Installation done.");
 		} else {
 			fprintf(stderr, "Incorrect argument usage\n");
@@ -386,8 +404,10 @@ main(int argc, char *argv[])
 			return (ERROR_BAD_ARGUMENTS);
 		}
 	} else if (strcmp(argv[1], "uninstall") == 0) {
-		if (argc == 3) {
+		if (argc == 4) {
 			int ret = zfs_uninstall(argv[2]);
+			if (0 == ret)
+				ret = zvol_uninstall(argv[3]);
 			if (0 == ret)
 				return (zfs_log_session_delete());
 			return (ret);
@@ -413,10 +433,10 @@ void
 printUsage() {
 	fprintf(stderr, "\nUsage:\n\n");
 	fprintf(stderr, "Install driver per INF DefaultInstall section:\n");
-	fprintf(stderr, "zfsinstaller install inf_path\n");
+	fprintf(stderr, "zfsinstaller install OpenZFS.inf OpenZVOL.inf\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Uninstall driver per INF DefaultUninstall section:\n");
-	fprintf(stderr, "zfsinstaller uninstall inf_path\n");
+	fprintf(stderr, "zfsinstaller uninstall OpenZFS.inf OpenZVOL.inf\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "zfsinstaller trace [-f Flags] | [-l Levels]"
 		" | [-s SizeOfETLInMB] | [-p AbsolutePathOfETL]\n");
@@ -438,7 +458,199 @@ printUsage() {
 	fprintf(stderr, "-d                 To delete the logman session\n");
 }
 
-DWORD zfs_install(char *inf_path) {
+HDEVINFO
+openDeviceInfo(char *inf, GUID *ClassGUID, char *ClassName, int namemax)
+{
+	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
+	char InfPath[MAX_PATH];
+
+	// Inf must be a full pathname
+	if (GetFullPathNameA(inf, MAX_PATH, InfPath, NULL) >= MAX_PATH) {
+		// inf pathname too long
+		goto final;
+	}
+
+	// Use the INF File to extract the Class GUID.
+	if (!SetupDiGetINFClassA(InfPath, ClassGUID, ClassName,
+		namemax, 0)) {
+		goto final;
+	}
+
+	// Create the container for the to-be-created
+	// Device Information Element.
+	DeviceInfoSet = SetupDiCreateDeviceInfoList(ClassGUID, 0);
+	if (DeviceInfoSet == INVALID_HANDLE_VALUE) {
+		goto final;
+	}
+
+	return (DeviceInfoSet);
+
+	final:
+	return (NULL);
+}
+
+DWORD
+installRootDevice(char *inf, bool IsServiceRunning, const char *rootdev)
+{
+	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
+	SP_DEVINFO_DATA DeviceInfoData;
+	char hwIdList[LINE_LEN + 4];
+	GUID ClassGUID;
+	char ClassName[MAX_CLASS_NAME_LEN];
+	int failcode = 12;
+
+	DWORD flags = INSTALLFLAG_FORCE;
+	BOOL reboot = FALSE;
+
+	DeviceInfoSet = openDeviceInfo(inf, &ClassGUID, ClassName,
+		MAX_CLASS_NAME_LEN);
+
+	ZeroMemory(hwIdList, sizeof(hwIdList));
+	if (FAILED(StringCchCopyA(hwIdList, LINE_LEN, rootdev))) {
+		goto final;
+	}
+
+	// Now create the element.
+	// Use the Class GUID and Name from the INF file.
+	DeviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+	if (!SetupDiCreateDeviceInfoA(DeviceInfoSet,
+		ClassName,
+		&ClassGUID,
+		NULL,
+		0,
+		DICD_GENERATE_ID,
+		&DeviceInfoData)) {
+		goto final;
+	}
+
+	// Add the HardwareID to the Device's HardwareID property.
+	if (!SetupDiSetDeviceRegistryPropertyA(DeviceInfoSet,
+		&DeviceInfoData,
+		SPDRP_HARDWAREID,
+		(LPBYTE)hwIdList,
+		(DWORD)(strlen(hwIdList) + 1 + 1) * sizeof(char))) {
+		goto final;
+	}
+
+	// If service is running.
+	if (!IsServiceRunning) {
+		//Transform the registry element into an actual devnode
+		//in the PnP HW tree.
+		if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE,
+			DeviceInfoSet,
+			&DeviceInfoData)) {
+			goto final;
+		}
+	}
+
+	failcode = 0;
+
+	// According to devcon we also have to Update now as well.
+	UpdateDriverForPlugAndPlayDevicesA(NULL, rootdev,
+		inf, flags, &reboot);
+
+	if (reboot) printf("Windows indicated a Reboot is required.\n");
+
+	final:
+
+	if (DeviceInfoSet != INVALID_HANDLE_VALUE) {
+		SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+	}
+	printf("%s: exit %d:0x%x\n", __func__, failcode, failcode);
+
+	return (failcode);
+}
+
+DWORD
+uninstallRootDevice(char *inf, const char *rootdev)
+{
+	int failcode = 13;
+	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
+	SP_DEVINFO_DATA DeviceInfoData;
+	DWORD DataT;
+	char *p, *buffer = NULL;
+	DWORD buffersize = 0;
+
+	printf("%s: \n", __func__);
+
+	DeviceInfoSet = SetupDiGetClassDevs(NULL, // All Classes
+		0, 0, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+	// All devices present on system
+	if (DeviceInfoSet == INVALID_HANDLE_VALUE)
+		goto final;
+
+	printf("%s: looking for device rootnode to remove...\n", __func__);
+
+	DeviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+	for (int i = 0; SetupDiEnumDeviceInfo(DeviceInfoSet, i,
+		&DeviceInfoData); i++) {
+		// Call once to get buffersize
+		while (!SetupDiGetDeviceRegistryPropertyA(
+			DeviceInfoSet,
+			&DeviceInfoData,
+			SPDRP_HARDWAREID,
+			&DataT,
+			(PBYTE)buffer,
+			buffersize,
+			&buffersize)) {
+
+			if (GetLastError() == ERROR_INVALID_DATA) {
+				// May be a Legacy Device with no HardwareID. Continue.
+				break;
+			} else if (GetLastError() ==
+				ERROR_INSUFFICIENT_BUFFER) {
+				// We need to change the buffer size.
+				if (buffer)
+					free(buffer);
+				buffer = (char *)malloc(buffersize);
+				if (buffer) ZeroMemory(buffer, buffersize);
+			} else {
+				// Unknown Failure.
+				goto final;
+			}
+		}
+
+		if (GetLastError() == ERROR_INVALID_DATA)
+			continue;
+
+		// Compare each entry in the buffer multi-sz list
+		// with our HardwareID.
+		for (p = buffer; *p && (p < &buffer[buffersize]);
+			p += strlen(p) + sizeof(char)) {
+			// printf("%s: comparing '%s' with '%s'\n",
+			//	 __func__, "ROOT\\ZFSin", p);
+			if (!_stricmp(rootdev, p)) {
+
+				printf("%s: device found, removing ... \n",
+					__func__);
+
+				// Worker function to remove device.
+				if (SetupDiCallClassInstaller(DIF_REMOVE,
+					DeviceInfoSet, &DeviceInfoData)) {
+					failcode = 0;
+				}
+				break;
+			}
+		}
+
+		if (buffer) free(buffer);
+		buffer = NULL;
+		buffersize = 0;
+	}
+
+	final:
+
+	if (DeviceInfoSet != INVALID_HANDLE_VALUE) {
+		SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+	}
+	printf("%s: exit %d:0x%x\n", __func__, failcode, failcode);
+
+	return (failcode);
+}
+
+DWORD
+zfs_install(char *inf_path)
+{
 
 	DWORD error = 0;
 	bool IsServiceRunning = false;
@@ -452,6 +664,12 @@ DWORD zfs_install(char *inf_path) {
 			inf_path, cwd);
 		return (-1);
 	}
+
+#ifdef _DEBUG
+	fprintf(stderr, "Checking if OpenZFS service is already running...\n");
+	system("sc query OpenZFS");
+	fprintf(stderr, "\n\n");
+#endif
 
 	error = executeInfSection("OpenZFS_Install 128 ", inf_path);
 
@@ -469,10 +687,62 @@ DWORD zfs_install(char *inf_path) {
 	}
 
 	if(!error)
-		error = installRootDevice(inf_path, IsServiceRunning);
+		error = installRootDevice(inf_path, IsServiceRunning, ZFS_ROOTDEV);
 
 	if (!error)
 		perf_counters_install(inf_path);
+
+#ifdef _DEBUG
+	fprintf(stderr, "Checking status on OpenZFS service ...\n");
+	system("sc query OpenZFS");
+#endif
+
+	return (error);
+}
+
+DWORD
+zvol_install(char *inf_path)
+{
+	DWORD error = 0;
+	bool IsServiceRunning = false;
+	// 128+4	If a reboot of the computer is necessary,
+	// ask the user for permission before rebooting.
+
+	if (_access(inf_path, F_OK) != 0) {
+		char cwd[1024];
+		_getcwd(cwd, sizeof (cwd));
+		fprintf(stderr, "Unable to locate '%s' we are at '%s'\r\n",
+			inf_path, cwd);
+		return (-1);
+	}
+
+#ifdef _DEBUG
+	fprintf(stderr, "Checking if OpenZVOLservice is already running...\n");
+	system("sc query OpenZVOL");
+	fprintf(stderr, "\n\n");
+#endif
+	error = executeInfSection("OpenZVOL_Install 128 ", inf_path);
+
+	// Start driver service if not already running
+	char serviceName[] = "OpenZVOL";
+	if (!error)
+		error = startService(serviceName);
+	else
+		fprintf(stderr, "Installation failed, skip "
+			"starting the service\r\n");
+
+	if (error == ERROR_SERVICE_ALREADY_RUNNING) {
+		IsServiceRunning = true;
+		error = 0;
+	}
+
+	if (!error)
+		error = installRootDevice(inf_path, IsServiceRunning, ZVOL_ROOTDEV);
+
+#ifdef _DEBUG
+	fprintf(stderr, "Checking status on OpenZVOL service ...\n");
+	system("sc query OpenZVOL");
+#endif
 
 	return (error);
 }
@@ -486,26 +756,59 @@ zfs_uninstall(char *inf_path)
 
 	Sleep(2000);
 
+#ifdef _DEBUG
+	fprintf(stderr, "Checking if OpenZFS service is already running...\n");
+	system("sc query OpenZFS");
+	fprintf(stderr, "\n\n");
+#endif
+
 	// 128+2	Always ask the users if they want to reboot.
 	if (ret == 0)
 		ret = executeInfSection("DefaultUninstall 128 ", inf_path);
 
 	if (ret == 0) {
-		ret = uninstallRootDevice(inf_path);
+		ret = uninstallRootDevice(inf_path, ZFS_ROOTDEV);
 		perf_counters_uninstall(inf_path);
 	}
+
+#ifdef _DEBUG
+	fprintf(stderr, "Checking status on OpenZFS service ...\n");
+	system("sc query OpenZFS");
+#endif
 
 	return (ret);
 }
 
-
 DWORD
-executeInfSection(const char *cmd, char *inf_path) {
+zvol_uninstall(char *inf_path)
+{
+	DWORD ret = 0;
 
 #ifdef _DEBUG
-	system("sc query OpenZFS");
+	fprintf(stderr, "Checking if OpenZVOL service is already running...\n");
+	system("sc query OpenZVOL");
 	fprintf(stderr, "\n\n");
 #endif
+
+	// 128+2	Always ask the users if they want to reboot.
+	if (ret == 0)
+		ret = executeInfSection("DefaultUninstall 128 ", inf_path);
+
+	if (ret == 0) {
+		ret = uninstallRootDevice(inf_path, ZVOL_ROOTDEV);
+	}
+
+#ifdef _DEBUG
+	fprintf(stderr, "Checking status on OpenZVOL service ...\n");
+	system("sc query OpenZVOL");
+#endif
+
+	return (ret);
+}
+
+DWORD
+executeInfSection(const char *cmd, char *inf_path)
+{
 
 	DWORD error = 0;
 
@@ -526,52 +829,7 @@ executeInfSection(const char *cmd, char *inf_path) {
 		0
 	);
 
-
-#ifdef _DEBUG
-	system("sc query OpenZFS");
-#endif
-
 	return (error);
-	// if we want to have some more control on installation, we need to get
-	// a bit deeper into the setupapi, something like the following...
-
-	/*
-	 * HINF inf = SetupOpenInfFile(
-	 * L"C:\\master_test\\ZFSin\\ZFSin.inf", //PCWSTR FileName,
-	 * NULL, //PCWSTR InfClass,
-	 * INF_STYLE_WIN4, //DWORD  InfStyle,
-	 * 0//PUINT  ErrorLine
-	 * );
-	 *
-	 * if (!inf) {
-	 * std::cout << "SetupOpenInfFile failed, err "
-	 * << GetLastError() << "\n";
-	 * return (-1);
-	 * }
-	 *
-	 *
-	 * int ret = SetupInstallFromInfSection(
-	 *	NULL, //owner
-	 *	inf, //inf handle
-	 *	L"DefaultInstall",
-	 *	SPINST_ALL, //flags
-	 *	NULL, //RelativeKeyRoot
-	 *	NULL, //SourceRootPath
-	 *	SP_COPY_NEWER_OR_SAME | SP_COPY_IN_USE_NEEDS_REBOOT, //CopyFlags
-	 *	NULL, //MsgHandler
-	 *	NULL, //Context
-	 *	NULL, //DeviceInfoSet
-	 *	NULL //DeviceInfoData
-	 * );
-	 *
-	 * if (!ret) {
-	 *		std::cout << "SetupInstallFromInfSection failed, err "
-	 *		<< GetLastError() << "\n";
-	 * return (-1);
-	 * }
-	 *
-	 * SetupCloseInfFile(inf);
-	 */
 }
 
 DWORD
@@ -584,7 +842,7 @@ startService(char *serviceName)
 	servMgrHdl = OpenSCManager(NULL, NULL, GENERIC_READ | GENERIC_EXECUTE);
 
 	if (!servMgrHdl) {
-		fprintf(stderr, "OpenSCManager failed, error %d\n",
+		fprintf(stderr, "OpenSCManager failed, error %lu\n",
 			GetLastError());
 		error = GetLastError();
 		goto End;
@@ -594,7 +852,7 @@ startService(char *serviceName)
 		GENERIC_READ | GENERIC_EXECUTE);
 
 	if (!zfsServHdl) {
-		fprintf(stderr, "OpenServiceA failed, error %d\n",
+		fprintf(stderr, "OpenServiceA failed, error %lu\n",
 			GetLastError());
 		error = GetLastError();
 		goto CloseMgr;
@@ -605,7 +863,7 @@ startService(char *serviceName)
 			fprintf(stderr, "Service is already running\n");
 			error = GetLastError();
 		} else {
-			fprintf(stderr, "StartServiceA failed, error %d\n",
+			fprintf(stderr, "StartServiceA failed, error %lu\n",
 				GetLastError());
 			// error = GetLastError();
 			goto CloseServ;
@@ -661,254 +919,3 @@ send_zfs_ioc_unregister_fs(void)
 	return (0);
 }
 
-#include <strsafe.h>
-#include <cfgmgr32.h>
-#include <newdev.h>
-
-#define	ZFS_ROOTDEV "ROOT\\OpenZFS"
-// DevCon uses LoadLib() - but lets just static link
-#pragma comment(lib, "Newdev.lib")
-
-HDEVINFO
-openDeviceInfo(char *inf, GUID *ClassGUID, char *ClassName, int namemax)
-{
-	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
-	char InfPath[MAX_PATH];
-
-	// Inf must be a full pathname
-	if (GetFullPathNameA(inf, MAX_PATH, InfPath, NULL) >= MAX_PATH) {
-		// inf pathname too long
-		goto final;
-	}
-
-	// Use the INF File to extract the Class GUID.
-	if (!SetupDiGetINFClassA(InfPath, ClassGUID, ClassName,
-		sizeof (ClassName) / sizeof (ClassName[0]), 0)) {
-		goto final;
-	}
-
-	// Create the container for the to-be-created
-	// Device Information Element.
-	DeviceInfoSet = SetupDiCreateDeviceInfoList(ClassGUID, 0);
-	if (DeviceInfoSet == INVALID_HANDLE_VALUE) {
-		goto final;
-	}
-
-	return (DeviceInfoSet);
-
-final:
-	return (NULL);
-}
-
-
-
-DWORD
-installRootDevice(char *inf, bool IsServiceRunning)
-{
-	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
-	SP_DEVINFO_DATA DeviceInfoData;
-	char hwIdList[LINE_LEN + 4];
-	GUID ClassGUID;
-	char ClassName[MAX_CLASS_NAME_LEN];
-	int failcode = 12;
-
-	DWORD flags = INSTALLFLAG_FORCE;
-	BOOL reboot = FALSE;
-
-	DeviceInfoSet = openDeviceInfo(inf, &ClassGUID, ClassName,
-		MAX_CLASS_NAME_LEN);
-
-	ZeroMemory(hwIdList, sizeof (hwIdList));
-	if (FAILED(StringCchCopyA(hwIdList, LINE_LEN, ZFS_ROOTDEV))) {
-		goto final;
-	}
-
-	// Now create the element.
-	// Use the Class GUID and Name from the INF file.
-	DeviceInfoData.cbSize = sizeof (SP_DEVINFO_DATA);
-	if (!SetupDiCreateDeviceInfoA(DeviceInfoSet,
-		ClassName,
-		&ClassGUID,
-		NULL,
-		0,
-		DICD_GENERATE_ID,
-		&DeviceInfoData)) {
-		goto final;
-	}
-
-	// Add the HardwareID to the Device's HardwareID property.
-	if (!SetupDiSetDeviceRegistryPropertyA(DeviceInfoSet,
-		&DeviceInfoData,
-		SPDRP_HARDWAREID,
-		(LPBYTE)hwIdList,
-		(DWORD) (strlen(hwIdList) + 1 + 1) * sizeof (char))) {
-		goto final;
-	}
-
-	// If service is running.
-	if (!IsServiceRunning) {
-		 //Transform the registry element into an actual devnode
-		 //in the PnP HW tree.
-		if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE,
-			DeviceInfoSet,
-			&DeviceInfoData)) {
-			goto final;
-		}
-	}
-
-	failcode = 0;
-
-	// According to devcon we also have to Update now as well.
-	UpdateDriverForPlugAndPlayDevicesA(NULL, ZFS_ROOTDEV,
-		inf, flags, &reboot);
-
-	if (reboot) printf("Windows indicated a Reboot is required.\n");
-
-final:
-
-	if (DeviceInfoSet != INVALID_HANDLE_VALUE) {
-		SetupDiDestroyDeviceInfoList(DeviceInfoSet);
-	}
-	printf("%s: exit %d:0x%x\n", __func__, failcode, failcode);
-
-	return (failcode);
-}
-
-DWORD
-uninstallRootDevice(char *inf)
-{
-	int failcode = 13;
-	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
-	SP_DEVINFO_DATA DeviceInfoData;
-	DWORD DataT;
-	char *p, *buffer = NULL;
-	DWORD buffersize = 0;
-
-	printf("%s: \n", __func__);
-
-	DeviceInfoSet = SetupDiGetClassDevs(NULL, // All Classes
-		0, 0, DIGCF_ALLCLASSES | DIGCF_PRESENT);
-	// All devices present on system
-	if (DeviceInfoSet == INVALID_HANDLE_VALUE)
-		goto final;
-
-	printf("%s: looking for device rootnode to remove...\n", __func__);
-
-	DeviceInfoData.cbSize = sizeof (SP_DEVINFO_DATA);
-	for (int i = 0; SetupDiEnumDeviceInfo(DeviceInfoSet, i,
-		&DeviceInfoData); i++) {
-		// Call once to get buffersize
-		while (!SetupDiGetDeviceRegistryPropertyA(
-			DeviceInfoSet,
-			&DeviceInfoData,
-			SPDRP_HARDWAREID,
-			&DataT,
-			(PBYTE)buffer,
-			buffersize,
-			&buffersize)) {
-
-			if (GetLastError() == ERROR_INVALID_DATA) {
-			// May be a Legacy Device with no HardwareID. Continue.
-				break;
-			} else if (GetLastError() ==
-				ERROR_INSUFFICIENT_BUFFER) {
-				// We need to change the buffer size.
-				if (buffer)
-					free(buffer);
-				buffer = (char *)malloc(buffersize);
-				if (buffer) ZeroMemory(buffer, buffersize);
-			} else {
-				// Unknown Failure.
-				goto final;
-			}
-		}
-
-		if (GetLastError() == ERROR_INVALID_DATA)
-			continue;
-
-		// Compare each entry in the buffer multi-sz list
-		// with our HardwareID.
-		for (p = buffer; *p && (p < &buffer[buffersize]);
-			p += strlen(p) + sizeof (char)) {
-			// printf("%s: comparing '%s' with '%s'\n",
-			//	 __func__, "ROOT\\ZFSin", p);
-			if (!_stricmp(ZFS_ROOTDEV, p)) {
-
-				printf("%s: device found, removing ... \n",
-					__func__);
-
-				// Worker function to remove device.
-				if (SetupDiCallClassInstaller(DIF_REMOVE,
-					DeviceInfoSet, &DeviceInfoData)) {
-						failcode = 0;
-					}
-					break;
-			}
-		}
-
-		if (buffer) free(buffer);
-		buffer = NULL;
-		buffersize = 0;
-	}
-
-final:
-
-	if (DeviceInfoSet != INVALID_HANDLE_VALUE) {
-		SetupDiDestroyDeviceInfoList(DeviceInfoSet);
-	}
-	printf("%s: exit %d:0x%x\n", __func__, failcode, failcode);
-
-	return (failcode);
-}
-
-#if 0
-
-
-
-
-	ZeroMemory(hwIdList, sizeof (hwIdList));
-	if (FAILED(StringCchCopyA(hwIdList, LINE_LEN, "ROOT\\ZFSin"))) {
-			goto final;
-	}
-
-	printf("%s: CchCopy\n", __func__);
-
-	// Now create the element.
-	// Use the Class GUID and Name from the INF file.
-	DeviceInfoData.cbSize = sizeof (SP_DEVINFO_DATA);
-	if (!SetupDiCreateDeviceInfoA(DeviceInfoSet,
-		ClassName,
-		&ClassGUID,
-		NULL,
-		0,
-		DICD_GENERATE_ID,
-		&DeviceInfoData)) {
-		goto final;
-	}
-
-	printf("%s: SetupDiCreateDeviceInfoA\n", __func__);
-
-	rmdParams.ClassInstallHeader.cbSize = sizeof (SP_CLASSINSTALL_HEADER);
-	rmdParams.ClassInstallHeader.InstallFunction = DIF_REMOVE;
-	rmdParams.Scope = DI_REMOVEDEVICE_GLOBAL;
-	rmdParams.HwProfile = 0;
-	if (!SetupDiSetClassInstallParamsA(DeviceInfoSet, &DeviceInfoData,
-		&rmdParams.ClassInstallHeader, sizeof (rmdParams)) ||
-		!SetupDiCallClassInstaller(DIF_REMOVE, DeviceInfoSet,
-			&DeviceInfoData)) {
-
-		// failed to invoke DIF_REMOVE
-		failcode = 14;
-		goto final;
-	}
-
-	failcode = 0;
-
-final:
-	if (DeviceInfoSet != INVALID_HANDLE_VALUE) {
-		SetupDiDestroyDeviceInfoList(DeviceInfoSet);
-	}
-	printf("%s: exit %d:0x%x\n", __func__, failcode, failcode);
-	return (failcode);
-}
-#endif

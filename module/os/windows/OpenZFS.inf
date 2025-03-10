@@ -7,8 +7,8 @@
 
 [Version]
 Signature   = "$Windows NT$"
-Class       = Volume
-ClassGuid   = {71a27cdd-812a-11d0-bec7-08002be2092f}
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %Me%
 DriverVer   = 05/19/2018,1.0.2.0
 CatalogFile = OpenZFS.cat
@@ -73,6 +73,8 @@ DelFiles   = OpenZFS.DriverFiles
 ;;,OpenZFS.DllFiles
 
 [DefaultUninstall.Services]
+; We shoud have this line, but if we do
+; we can no longer unload. Solve this puzzle.
 DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
 
 ;
@@ -83,8 +85,8 @@ DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
 DisplayName      = %ServiceName%
 Description      = %ServiceDescription%
 ServiceBinary    = %12%\%DriverName%.sys    ;%windir%\system32\drivers\
-ServiceType      = 2
-StartType        = 1                        ;SERVICE_SYSTEM_START
+ServiceType      = 2                        ;File System Driver
+StartType        = 3                        ;SERVICE_SYSTEM_START
 ErrorControl     = 1
 LoadOrderGroup   = "File System"
 

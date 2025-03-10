@@ -57,7 +57,11 @@
 #include <sys/zvol.h>
 #include <sys/zvol_impl.h>
 #include <sys/zvol_os.h>
+#include <sys/openzvol.h>
 #include <sys/driver_extension.h>
+
+#define	dprintf(...) 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
+extern PDRIVER_OBJECT OPENZVOL_DriverObject;
 
 /*
  * We have a list of ZVOLs, and we receive incoming (Target, Lun)
@@ -147,7 +151,7 @@ wzvol_lock_target(zvol_state_t *zv)
 static inline void
 wzvol_unlock_target(zvol_state_t *zv)
 {
-	wzvolContext* zvc = (pwzvolContext)zv->zv_zso->zso_target_context;
+	wzvolContext *zvc = (pwzvolContext)zv->zv_zso->zso_target_context;
 	IoReleaseRemoveLock(zvc->pIoRemLock, zv);
 	wzvol_decref_target(zvc);
 }
@@ -155,7 +159,7 @@ wzvol_unlock_target(zvol_state_t *zv)
 int
 wzvol_assign_targetid(zvol_state_t *zv)
 {
-	wzvolContext* zv_targets = STOR_wzvolDriverInfo.zvContextArray;
+	wzvolContext *zv_targets = STOR_wzvolDriverInfo.zvContextArray;
 	ASSERT(zv->zv_zso->zso_target_context == NULL);
 	PIO_REMOVE_LOCK pIoRemLock = ExAllocatePoolWithTag(NonPagedPoolNx,
 	    sizeof (*pIoRemLock), MP_TAG_GENERAL);
@@ -275,6 +279,7 @@ wzvol_clear_targetid(uint8_t targetid, uint8_t lun, zvol_state_t *zv)
 		    zv, NULL) == zv) {
 			IoReleaseRemoveLockAndWait(zvc->pIoRemLock, zv);
 			wzvol_decref_target(zvc);
+			zv->zv_zso->zso_target_context = NULL;
 		}
 	}
 }
@@ -576,7 +581,7 @@ ScsiOpVPD(
 		memcpy(&pPage->SerialNumber[0], zv->zv_name,
 		    strlen(zv->zv_name));
 
-		dprintf("ScsiOpVPD:  VPD Page: %d Serial No.: %s",
+		dprintf("ScsiOpVPD:  VPD Page: %d Serial No.: %s\n",
 		    pPage->PageCode, (const char *)pPage->SerialNumber);
 	}
 	break;
@@ -758,6 +763,9 @@ ScsiOpUnmap_impl(
 
 	// Test for DataLength > MaxTransferLength ?
 
+	if (pzvol_os_unmap == NULL)
+		return (SRB_STATUS_INTERNAL_ERROR);
+
 	// Fasttrack 0 length
 	if (DataLength == 0)
 		return (SRB_STATUS_SUCCESS);
@@ -781,7 +789,7 @@ ScsiOpUnmap_impl(
 		    ((UINT32)Src->LbaCount[2] << 8) |
 		    ((UINT32)Src->LbaCount[3]);
 
-		ret = zvol_os_unmap(zv,
+		ret = pzvol_os_unmap(zv,
 		    BlockAddress * zv->zv_volblocksize,
 		    BlockCount * zv->zv_volblocksize);
 		if (ret != 0)
@@ -925,6 +933,11 @@ wzvol_WkRtn(__in PVOID pWkParms)
 		status = SRB_STATUS_NO_DEVICE;
 		goto Done;
 	}
+	if (pzvol_os_read_zv == NULL ||
+	    pzvol_os_write_zv == NULL) {
+		status = SRB_STATUS_NO_DEVICE;
+		goto Done;
+	}
 
 	if (ActionUnmap == pWkRtnParms->Action) {
 		status = ScsiOpUnmap_impl(pHBAExt, pSrb, zv);
@@ -977,9 +990,9 @@ wzvol_WkRtn(__in PVOID pWkParms)
 
 	/* Call ZFS to read/write data */
 	if (ActionRead == pWkRtnParms->Action) {
-		status = zvol_os_read_zv(zv, &uio, flags);
+		status = pzvol_os_read_zv(zv, &uio, flags);
 	} else {
-		status = zvol_os_write_zv(zv, &uio, flags);
+		status = pzvol_os_write_zv(zv, &uio, flags);
 	}
 
 	if (status == 0)
@@ -1041,12 +1054,11 @@ bzvol_ReadWriteTaskRtn(__in PVOID  pWkParms)
 	    pIo->Length, 0);
 
 	/* Call ZFS to read/write data */
-
 	if (ActionRead == pWkRtnParms->Action) {
-		iores = zvol_os_read_zv(pWkRtnParms->zv, &uio, 0);
+		iores = pzvol_os_read_zv(pWkRtnParms->zv, &uio, 0);
 	} else {
 		/* TODO add flag if FUA */
-		iores = zvol_os_write_zv(pWkRtnParms->zv, &uio, 0);
+		iores = pzvol_os_write_zv(pWkRtnParms->zv, &uio, 0);
 	}
 
 	if (pIo->Cb) {
@@ -1069,9 +1081,10 @@ bzvol_TaskQueuingWkRtn(__in PVOID pDummy, __in PVOID pWkParms)
 	IoUninitializeWorkItem(pWI);
 
 	if (pIo->Flags & ZFSZVOLFG_AlwaysPend) {
-		taskq_init_ent(&pWkRtnParms->ent);
-		taskq_dispatch_ent(zvol_taskq, bzvol_ReadWriteTaskRtn,
-		    pWkRtnParms, 0, &pWkRtnParms->ent);
+// keep
+//		taskq_init_ent(&pWkRtnParms->ent);
+//		taskq_dispatch_ent(zvol_taskq, bzvol_ReadWriteTaskRtn,
+//		    pWkRtnParms, 0, &pWkRtnParms->ent);
 	} else {
 		// bypass the taskq and do everything under workitem thread
 		// context.
@@ -1094,6 +1107,12 @@ DiReadWriteSetup(zvol_state_t *zv, MpWkRtnAction action, zfsiodesc_t *pIo)
 		}
 		return (STATUS_INSUFFICIENT_RESOURCES);
 	}
+
+	if (pzvol_os_read_zv == NULL ||
+	    pzvol_os_write_zv == NULL) {
+		return (SRB_STATUS_NO_DEVICE);
+	}
+
 	RtlZeroMemory(pWkRtnParms, sizeof (MP_WorkRtnParms));
 	pWkRtnParms->ioDesc = *pIo;
 	pWkRtnParms->zv = zv;
@@ -1105,12 +1124,12 @@ DiReadWriteSetup(zvol_state_t *zv, MpWkRtnAction action, zfsiodesc_t *pIo)
 	 * we do not want to slow down the caller so perform taskq queuing
 	 * always in the workitem.
 	 */
-	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
 	PIO_WORKITEM pWI = (PIO_WORKITEM)ALIGN_UP_POINTER_BY(
 	    pWkRtnParms->pQueueWorkItem, 16);
-	IoInitializeWorkItem(DriverExtension->ioctlDeviceObject, pWI);
+	IoInitializeWorkItem(OPENZVOL_DriverObject->DeviceObject, pWI);
 	IoQueueWorkItem(pWI, (PIO_WORKITEM_ROUTINE)bzvol_TaskQueuingWkRtn,
 	    DelayedWorkQueue, pWkRtnParms);
+
 	return (STATUS_PENDING); // queued up.
 }
 

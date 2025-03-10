@@ -125,7 +125,7 @@ void ZFSinCachePerfEnumerate(PCW_MASK_INFORMATION EnumerateInstances);
 #endif
 
 static void *notification_entry = NULL, *notification_entry2 = NULL,
-	*notification_entry3 = NULL;
+    *notification_entry3 = NULL;
 
 extern int zcommon_init(void);
 
@@ -133,6 +133,8 @@ extern void arc_cache_counters_perfmon(cache_counters *perf,
     arc_stats_t *arc_ptr);
 extern void zil_cache_counters_perfmon(cache_counters *perf,
     zil_kstat_values_t *zil_ptr);
+
+extern void zvol_os_deregister_module(void);
 
 // extern void zfs_windows_vnops_callback(PDEVICE_OBJECT deviceObject);
 
@@ -971,60 +973,65 @@ DriverNotificationRoutine(_In_ struct _DEVICE_OBJECT *DeviceObject,
 	}
 }
 
-extern void sysctl_os_fini(void);
-extern PDRIVER_UNLOAD STOR_DriverUnload;
-
+/*
+ * This is run from bus_dispatcher(REMOVE_DEVICE) to do enough unloading
+ * work so that DriverUnload is eventually called.
+ */
 void
-zfs_unload_ioctl(
-    _In_ PDEVICE_OBJECT fsDiskDeviceObject,
-    _In_opt_ PVOID Context)
+zfs_unload_stage_1(void)
 {
-	NTSTATUS Status;
 	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
 
-	IoFreeWorkItem((PIO_WORKITEM)Context);
+	dprintf("Starting Driver Unload stage 1...\n");
 
-	dprintf("Starting Driver Unload process...\n");
+	if (DriverExtension->FunctionalDeviceObject) {
+		mount_t *zmo_bus = DriverExtension->FunctionalDeviceObject->DeviceExtension;
 
-	sysctl_os_fini();
+		// REMOVE_DEVICE already detached these.
+		zmo_bus->AttachedDevice = NULL;
+		DriverExtension->LowerDeviceObject = NULL;
 
-	if (DriverExtension->STOR_DriverUnload != NULL) {
-		DriverExtension->STOR_DriverUnload(WIN_DriverObject);
-		DriverExtension->STOR_DriverUnload = NULL;
+		// Delete the bus
+		IoDeleteDevice(DriverExtension->FunctionalDeviceObject);
+		DriverExtension->FunctionalDeviceObject = NULL;
 	}
 
-	mutex_enter(&zfsdev_state_lock);
-	mount_t *dgl = DriverExtension->ioctlDeviceObject->DeviceExtension;
-	Status = IoDeleteSymbolicLink(&dgl->symlink_name);
-	ObDereferenceObject(DriverExtension->ioctlDeviceObject);
-	IoDeleteDevice(DriverExtension->ioctlDeviceObject);
-	DriverExtension->ioctlDeviceObject = NULL; // Use to signal we unloaded
-	mutex_exit(&zfsdev_state_lock);
+	// Unregister FileSystem
+	if (DriverExtension->fsDiskDeviceObject) {
+		IoUnregisterFileSystem(DriverExtension->fsDiskDeviceObject);
+		IoDeleteDevice(DriverExtension->fsDiskDeviceObject);
+		DriverExtension->fsDiskDeviceObject = NULL;
+	}
 
-	IoUnregisterFsRegistrationChange(WIN_DriverObject,
-	    DriverNotificationRoutine);
-	IoUnregisterFileSystem(DriverExtension->fsDiskDeviceObject);
-	ObDereferenceObject(DriverExtension->fsDiskDeviceObject);
+	// Remove the ioctl node for userland
+	if (DriverExtension->ioctlDeviceObject) {
+		mutex_enter(&zfsdev_state_lock);
+		mount_t *dgl = DriverExtension->ioctlDeviceObject->DeviceExtension;
+		IoDeleteSymbolicLink(&dgl->symlink_name);
+		IoDeleteDevice(DriverExtension->ioctlDeviceObject);
+		DriverExtension->ioctlDeviceObject = NULL; // Use to signal we unloaded
+		mutex_exit(&zfsdev_state_lock);
+	}
 
-	IoUnregisterPlugPlayNotification(notification_entry);
-	IoUnregisterPlugPlayNotification(notification_entry3);
-	IoUnregisterPlugPlayNotification(notification_entry2);
+	// Unload OpenZVOL.sys here, not needed so soon but
+	// it can take up to 3s to stop the waiting thread.
+	zvol_os_deregister_module();
 
-	IoDetachDevice(DriverExtension->LowerDeviceObject);
-
-	if (DriverExtension->StorportDeviceObject)
-		IoDetachDevice(DriverExtension->StorportDeviceObject);
-	IoDeleteDevice(DriverExtension->FunctionalDeviceObject);
-
-	IoDetachDevice(DriverExtension->PhysicalDeviceObject);
-	IoDeleteDevice(DriverExtension->fsDiskDeviceObject);
-
-	DriverExtension->fsDiskDeviceObject = NULL;
-
-	// DriverUnload should now be called. But it isnt
-
+	// Now DriverUnload should be called.
 }
 
+/*
+ * Stage 2 is called from DriverUnload
+ */
+void
+zfs_unload_stage_2(void)
+{
+	NTSTATUS Status;
+}
+
+/*
+ * Quick check to see if OpenZFS is busy
+ */
 uint64_t
 zfs_ioc_unregister_fs(void)
 {
@@ -1035,18 +1042,6 @@ zfs_ioc_unregister_fs(void)
 		return (zfs_module_busy);
 	}
 
-	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
-
-	// If we are shutting down, the main device is gone, but
-	// ioctl remains, release it.
-	if (DriverExtension->fsDiskDeviceObject != NULL) {
-		PIO_WORKITEM workItem =
-		    IoAllocateWorkItem(DriverExtension->fsDiskDeviceObject);
-		if (workItem) {
-			IoQueueWorkItem(workItem, zfs_unload_ioctl,
-			    DelayedWorkQueue, workItem);
-		}
-	}
 	return (0);
 }
 
@@ -1096,9 +1091,9 @@ volume_notification(PVOID NotificationStructure, PVOID Context)
 	    (DEVICE_INTERFACE_CHANGE_NOTIFICATION *)NotificationStructure;
 
 	if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_ARRIVAL,
-	    sizeof (GUID)) == sizeof (GUID))
+	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s arrival: %wZ\n", __func__, dicn->SymbolicLinkName);
-	else if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_REMOVAL,
+	} else if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_REMOVAL,
 	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s removal: %wZ\n", __func__, dicn->SymbolicLinkName);
 		zfs_windows_unmount_free(dicn->SymbolicLinkName);
@@ -1114,12 +1109,12 @@ pnp_notification(PVOID NotificationStructure, PVOID Context)
 	    (DEVICE_INTERFACE_CHANGE_NOTIFICATION *)NotificationStructure;
 
 	if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_ARRIVAL,
-	    sizeof (GUID)) == sizeof (GUID))
+	    sizeof(GUID)) == sizeof(GUID)) {
 		dprintf("%s arrival: %wZ\n", __func__, dicn->SymbolicLinkName);
-	else if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_REMOVAL,
-	    sizeof (GUID)) == sizeof (GUID))
+	} else if (RtlCompareMemory(&dicn->Event, &GUID_DEVICE_INTERFACE_REMOVAL,
+	    sizeof (GUID)) == sizeof (GUID)) {
 		dprintf("%s removal: %wZ\n", __func__, dicn->SymbolicLinkName);
-
+	}
 	return (STATUS_SUCCESS);
 }
 
@@ -1129,7 +1124,7 @@ zfs_init_driver_extension(PDRIVER_OBJECT DriverObject)
 	NTSTATUS status;
 	OpenZFS_Driver_Extension *DriverExtension;
 
-	// Identifying the extension, StorPort uses DriverEntry
+	// Identifying the extension
 	status = IoAllocateDriverObjectExtension(
 	    DriverObject,
 	    DriverObject,
@@ -1196,18 +1191,13 @@ OpenZFS_AddDevice(
 		    DriverExtension->FunctionalDeviceObject;
 		zmo_bus->PhysicalDeviceObject = PhysicalDeviceObject;
 
-		// A bit questionable, but we attach to the stack, so we
-		// know what is above us, then detach again. We call
-		// StorPortInitialize(), and they will attach. Bonus action
-		// is we then know the Storport DeviceObject.
-		zmo_bus->AttachedDevice =
-		    IoAttachDeviceToDeviceStack(
-		    DriverExtension->FunctionalDeviceObject,
-		    zmo_bus->PhysicalDeviceObject);
+		status = IoReportDetectedDevice(DriverObject, InterfaceTypeUndefined, 0xFFFFFFFF, 0xFFFFFFFF,
+		    NULL, NULL, 0, &zmo_bus->PhysicalDeviceObject);
+		zmo_bus->AttachedDevice = IoAttachDeviceToDeviceStack(
+		    DriverExtension->FunctionalDeviceObject, zmo_bus->PhysicalDeviceObject);
 		DriverExtension->LowerDeviceObject = zmo_bus->AttachedDevice;
-
-		IoDetachDevice(zmo_bus->AttachedDevice);
-		// Storport
+		zmo_bus->PhysicalDeviceObject->Flags &=
+		    ~DO_DEVICE_INITIALIZING;
 
 		DriverExtension->FunctionalDeviceObject->Flags &=
 		    ~DO_DEVICE_INITIALIZING;
@@ -1251,23 +1241,8 @@ OpenZFS_AddDevice(
 			return (-1);
 		}
 
-		ObReferenceObject(DriverExtension->ioctlDeviceObject);
-
 		DriverExtension->ioctlDeviceObject->Flags &=
 		    ~DO_DEVICE_INITIALIZING;
-
-		// Let StorPort have a go
-		if (DriverExtension->STOR_AddDevice)
-			status = DriverExtension->STOR_AddDevice(DriverObject,
-			    PhysicalDeviceObject);
-
-		// Add ourselves after Storport, and remember what Storport
-		// device object is.
-		zmo_bus->AttachedDevice =
-		    IoAttachDeviceToDeviceStack(
-		    DriverExtension->FunctionalDeviceObject,
-		    zmo_bus->PhysicalDeviceObject);
-		DriverExtension->StorportDeviceObject = zmo_bus->AttachedDevice;
 
 		DriverExtension->FunctionalDeviceObject->Flags &=
 		    ~DO_DEVICE_INITIALIZING;
@@ -1284,13 +1259,11 @@ OpenZFS_AddDevice(
 	if (vfs_mount_member(PhysicalDeviceObject->DeviceExtension)) {
 
 		mount_add_device(DriverObject, PhysicalDeviceObject);
-
 		return (STATUS_SUCCESS);
 	}
 
 	return (STATUS_SUCCESS);
 }
-
 
 int
 zfsdev_attach(void)
@@ -1429,13 +1402,11 @@ zfsdev_attach(void)
 	    WIN_DriverObject, &notification_entry);
 
 	IoRegisterFileSystem(DriverExtension->fsDiskDeviceObject);
-	ObReferenceObject(DriverExtension->fsDiskDeviceObject);
-
-	// This should then call AddDevice() next.
 
 	/* Let zed know driver is ready */
 	zfs_send_system_boot();
 
+	// This should then call AddDevice() next.
 	return (0);
 
 openzfs_os_failed:
@@ -1452,24 +1423,25 @@ zcommon_failed:
 void
 zfsdev_detach(void)
 {
-	zfsdev_state_t *zs, *zsprev = NULL;
+	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
+
+	dprintf("Starting Driver Unload stage 2...\n");
 
 	IoUnregisterFsRegistrationChange(WIN_DriverObject,
 	    DriverNotificationRoutine);
 
+	IoUnregisterPlugPlayNotification(notification_entry);
+	IoUnregisterPlugPlayNotification(notification_entry3);
+	IoUnregisterPlugPlayNotification(notification_entry2);
+
+	// We still have the original PDO given to us in AddDevice
+	DriverExtension->PhysicalDeviceObject = NULL;
+
+	// DriverExtension should be NULL here.
+
 	UnregisterZFSinPerf();
 	UnregisterZFSinPerfVdev();
 	UnregisterZFSinCachePerf();
-
-	PDEVICE_OBJECT deviceObject = WIN_DriverObject->DeviceObject;
-	UNICODE_STRING uniWin32NameString;
-
-	RtlInitUnicodeString(&uniWin32NameString, ZFS_DEV_DOS);
-	IoDeleteSymbolicLink(&uniWin32NameString);
-	if (deviceObject != NULL) {
-		ObDereferenceObject(deviceObject);
-		IoDeleteDevice(deviceObject);
-	}
 
 	tsd_destroy(&zfsdev_private_tsd);
 

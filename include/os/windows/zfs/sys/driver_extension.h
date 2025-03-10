@@ -27,16 +27,11 @@
 #define	SYS_DRIVER_EXTENSION_H
 
 struct OpenZFS_Driver_Extension_s {
-	PDEVICE_OBJECT PhysicalDeviceObject;
-	PDEVICE_OBJECT LowerDeviceObject;
-	PDEVICE_OBJECT FunctionalDeviceObject; // AddDevice unknown
+	PDEVICE_OBJECT PhysicalDeviceObject; // AddDevice
+	PDEVICE_OBJECT LowerDeviceObject; // Attached
+	PDEVICE_OBJECT FunctionalDeviceObject; // OpenZFS_bus
 	PDEVICE_OBJECT ioctlDeviceObject;  // /dev/zfs pdo
 	PDEVICE_OBJECT fsDiskDeviceObject; // /dev/zfs vdo
-	PDEVICE_OBJECT StorportDeviceObject;
-
-	PDRIVER_UNLOAD STOR_DriverUnload;
-	PDRIVER_ADD_DEVICE STOR_AddDevice;
-	PDRIVER_DISPATCH STOR_MajorFunction[IRP_MJ_MAXIMUM_FUNCTION + 1];
 };
 
 typedef struct OpenZFS_Driver_Extension_s OpenZFS_Driver_Extension;
@@ -47,5 +42,8 @@ typedef struct OpenZFS_Driver_Extension_s OpenZFS_Driver_Extension;
 
 extern int
 zfs_init_driver_extension(PDRIVER_OBJECT);
+
+extern void zfs_unload_stage_1(void);
+extern void zfs_unload_stage_2(void);
 
 #endif

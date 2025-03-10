@@ -16,6 +16,7 @@
 
 add_subdirectory(spl)
 add_subdirectory(zfs)
+add_subdirectory(zvol)
 
 wdk_add_driver(OpenZFS
   debug.c
@@ -37,8 +38,8 @@ target_link_libraries(OpenZFS PRIVATE
 	unicodekern
 	# WDK libraries
 	WDK::WDMSEC
-	WDK::STORPORT
-	WDK::SCSIWMI
+#	WDK::STORPORT
+#	WDK::SCSIWMI
 )
 
 # set(CMAKE_LINKER link.exe)

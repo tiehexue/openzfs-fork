@@ -2255,8 +2255,10 @@ pnp_query_id(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	 */
 	switch (IrpSp->Parameters.QueryId.IdType) {
 	case BusQueryDeviceID:
+		// RtlUnicodeStringPrintf(&mpt,
+		//    L"OpenZFS\\%wZ%lc", &zmo->uuid, 0);
 		RtlUnicodeStringPrintf(&mpt,
-		    L"OpenZFS\\%wZ%lc", &zmo->uuid, 0);
+		    L"OpenZFS_bus\\%wZ%lc", &zmo->uuid, 0); // OpenZFS_bus
 		idString = mpt.Buffer;
 		idLen = mpt.Length;
 		break;
@@ -6778,6 +6780,7 @@ _Function_class_(DRIVER_DISPATCH)
 
 	Status = STATUS_INVALID_DEVICE_REQUEST;
 	int DoForward = 1;
+	mount_t *zmo = DeviceObject->DeviceExtension;
 
 	switch (IrpSp->MajorFunction) {
 
@@ -6797,14 +6800,36 @@ _Function_class_(DRIVER_DISPATCH)
 			break;
 		case IRP_MN_REMOVE_DEVICE:
 			dprintf("IRP_MN_REMOVE_DEVICE\n");
+			VERIFY(zmo->type == MOUNT_TYPE_BUS);
+
+			// DriverExtension->LowerDeviceObject == zmo_bus->AttachedDevice
+			IoDetachDevice(zmo->AttachedDevice);
+
+			// Forward the IRP down the stack before deleting
+			IoSkipCurrentIrpStackLocation(Irp);
+			Status = IoCallDriver(zmo->AttachedDevice, Irp);
+
+			zfs_unload_stage_1();
+
+			*PIrp = NULL; // Stop completion of IRP below
 			Status = STATUS_SUCCESS;
+			break;
+		case IRP_MN_QUERY_REMOVE_DEVICE:
+			dprintf("IRP_MN_QUERY_REMOVE_DEVICE\n");
+			IoSkipCurrentIrpStackLocation(Irp);
+			Status = IoCallDriver(zmo->AttachedDevice, Irp);
+			*PIrp = NULL; // Stop completion of IRP below
+			if (NT_SUCCESS(Status)) {
+				Status = STATUS_SUCCESS;
+				dprintf("IRP_MN_QUERY_REMOVE_DEVICE: success\n");
+			} else {
+				Status = STATUS_UNSUCCESSFUL;
+				dprintf("IRP_MN_QUERY_REMOVE_DEVICE: unsuccessful\n");
+			}
 			break;
 		case IRP_MN_QUERY_DEVICE_RELATIONS:
 			Status = QueryDeviceRelations(DeviceObject, PIrp,
 			    IrpSp);
-			// No need to call Storport, and they completed Irp.
-			// *PIrp = NULL;
-			DoForward = 0;
 			break;
 		case IRP_MN_QUERY_CAPABILITIES:
 			Status = QueryCapabilities(DeviceObject, Irp, IrpSp);
@@ -6843,39 +6868,6 @@ _Function_class_(DRIVER_DISPATCH)
 			    IrpSp->MinorFunction); // 0x0b
 			DoForward = 0;
 			break;
-		}
-
-		/* All IRP_MJ_PNP are expected to be sent to lower devices */
-		if (DriverExtension->StorportDeviceObject &&
-		    DriverExtension->STOR_MajorFunction[IrpSp->MajorFunction] !=
-		    NULL &&
-		    DoForward) {
-			NTSTATUS Status2;
-
-			dprintf("STORport sending down: %s\n",
-			    major2str(IrpSp->MajorFunction,
-			    IrpSp->MinorFunction));
-
-			IoCopyCurrentIrpStackLocationToNext(Irp);
-			Status2 = IoCallDriver(
-			    DriverExtension->StorportDeviceObject,
-			    Irp);
-
-			dprintf("STORport exit: 0x%lx %s "
-			    "Information 0x%llx : %s\n",
-			    Status2,
-			    common_status_str(Status2),
-			    Irp ? Irp->IoStatus.Information : 0,
-			    major2str(IrpSp->MajorFunction,
-			    IrpSp->MinorFunction));
-
-
-			// Since we forwarded the Irp, we do not call
-			// IrpCompleteRequest()
-			*PIrp = NULL;
-
-			if (Status == STATUS_INVALID_DEVICE_REQUEST)
-				Status = Status2;
 		}
 		break;
 
@@ -6944,6 +6936,19 @@ _Function_class_(DRIVER_DISPATCH)
 		break;
 	case IRP_MJ_CLOSE:
 		Status = zfsdev_release((dev_t)IrpSp->FileObject, Irp);
+//		if (DriverExtension->Unload) {
+//			DriverExtension->Unload = B_FALSE;
+			// If we are shutting down, the main device is gone, but
+			// ioctl remains, release it.
+//			if (DriverExtension->fsDiskDeviceObject != NULL) {
+//				PIO_WORKITEM workItem =
+//				    IoAllocateWorkItem(DriverExtension->fsDiskDeviceObject);
+//				if (workItem) {
+//					IoQueueWorkItem(workItem, zfs_unload_ioctl,
+//					    DelayedWorkQueue, workItem);
+//				}
+//			}
+//		}
 		break;
 	case IRP_MJ_DEVICE_CONTROL:
 		{
@@ -7448,7 +7453,8 @@ _Function_class_(DRIVER_DISPATCH)
 			break;
 		case IRP_MN_REMOVE_DEVICE:
 			dprintf("IRP_MN_REMOVE_DEVICE\n");
-			Status = STATUS_UNSUCCESSFUL;
+			// Status = STATUS_UNSUCCESSFUL;
+			Status = STATUS_SUCCESS;
 			break;
 		case IRP_MN_QUERY_DEVICE_RELATIONS:
 			Status = QueryDeviceRelations(DeviceObject, PIrp,
@@ -8073,48 +8079,6 @@ _Function_class_(DRIVER_DISPATCH)
 		else if (zmo && zmo->type == MOUNT_TYPE_VCB)
 			Status = fsDispatcher(DeviceObject, &Irp, IrpSp);
 		else {
-
-			if (DriverExtension->STOR_MajorFunction[
-			    IrpSp->MajorFunction] != NULL) {
-
-				if (TopLevel) {
-					IoSetTopLevelIrp(NULL);
-				}
-				if (AtIrqlPassiveLevel) {
-					FsRtlExitFileSystem();
-				}
-
-				// If unload, refuse everything.
-				if (DriverExtension->ioctlDeviceObject ==
-				    NULL) {
-					Status = STATUS_DEVICE_NOT_READY;
-					Irp->IoStatus.Status = Status;
-
-					IoCompleteRequest(Irp,
-					    Status == STATUS_SUCCESS ?
-					    IO_DISK_INCREMENT :
-					    IO_NO_INCREMENT);
-					return (Status);
-				}
-
-				dprintf("dispatcher: IRP to STORport\n");
-
-				Status = DriverExtension->STOR_MajorFunction[
-				    IrpSp->MajorFunction]
-				    (DeviceObject, Irp);
-
-				dprintf("dispatcher: STORport exit: "
-				    "0x%lx %s Information 0x%llx : %s\n",
-				    Status,
-				    common_status_str(Status),
-				    Irp ? Irp->IoStatus.Information : 0,
-				    major2str(IrpSp->MajorFunction,
-				    IrpSp->MinorFunction));
-				return (Status);
-			}
-
-			dprintf("This is weird, nobody to handle IRP\n");
-			// Got a request we don't care about?
 			Status = STATUS_INVALID_DEVICE_REQUEST;
 			Irp->IoStatus.Information = 0;
 			zmo = NULL;
@@ -8329,7 +8293,7 @@ NTSTATUS
 pnp_query_di(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
 	NTSTATUS status;
-
+#if 0
 	if (IsEqualGUID(IrpSp->Parameters.QueryInterface.InterfaceType,
 	    &ZFSZVOLDI_GUID)) {
 		if (IrpSp->Parameters.QueryInterface.Version < 1)
@@ -8380,6 +8344,7 @@ pnp_query_di(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 				status = STATUS_NOT_FOUND;
 		}
 	} else
+#endif
 		status = STATUS_INVALID_DEVICE_REQUEST;
 
 	return (status);

@@ -61,6 +61,8 @@ extern void sysctl_os_init(PUNICODE_STRING RegistryPath);
 extern void sysctl_os_all(PUNICODE_STRING RegistryPath);
 extern void sysctl_os_fini(void);
 
+extern int  zvol_os_register_module(void);
+extern void zvol_os_deregister_module(void);
 
 #ifdef __clang__
 #error "This file should be compiled with MSVC not Clang"
@@ -79,6 +81,14 @@ OpenZFS_Fini(PDRIVER_OBJECT DriverObject)
 	ZFS_DRIVER_EXTENSION(DriverObject, DriverExtension);
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "OpenZFS_Fini\n"));
+	DbgBreakPoint();
+
+	sysctl_os_fini();
+
+	zfs_unload_stage_2();
+
+	// Called from zfs_ioc_unregister_fs
+	// zvol_os_deregister_module();
 
 	zfs_vfsops_fini();
 
@@ -146,31 +156,6 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	 * that Dispatcher can use them.
 	 */
 
-	// Set to IopInvalidDeviceRequest() which is annoying.
-	memset(WIN_DriverObject->MajorFunction, 0,
-	    sizeof (DriverExtension->STOR_MajorFunction));
-	status = zvol_start(DriverObject, pRegistryPath);
-
-	if (STATUS_SUCCESS != status) {
-		/* If we failed, we carryon without ZVOL support. */
-		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-		    "OpenZFS: StorPortInitialize() failed, no ZVOL. %d/0x%x\n",
-		    status, status));
-		memset(DriverExtension->STOR_MajorFunction, 0,
-		    sizeof (DriverExtension->STOR_MajorFunction));
-		DriverExtension->STOR_DriverUnload = NULL;
-		DriverExtension->STOR_AddDevice = NULL;
-	} else {
-		/* Make a copy of the Driver Callbacks for miniport */
-		memcpy(DriverExtension->STOR_MajorFunction,
-		    WIN_DriverObject->MajorFunction,
-		    sizeof (DriverExtension->STOR_MajorFunction));
-		DriverExtension->STOR_DriverUnload =
-		    WIN_DriverObject->DriverUnload;
-		DriverExtension->STOR_AddDevice =
-		    WIN_DriverObject->DriverExtension->AddDevice;
-	}
-
 	/* Now set the Driver Callbacks to dispatcher and start ZFS */
 	WIN_DriverObject->DriverUnload = OpenZFS_Fini;
 
@@ -184,6 +169,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	if (DriverExtension->fsDiskDeviceObject)
 		sysctl_os_registry_change(DriverExtension->fsDiskDeviceObject,
 		    pRegistryPath);
+
+	zvol_os_register_module();
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "OpenZFS: Started\n"));
