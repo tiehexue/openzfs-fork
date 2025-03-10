@@ -36,6 +36,7 @@
 #include <sys/taskq.h>
 #include <sys/wzvol.h>
 #include <sys/mount.h>
+#include <sys/random.h>
 #include <sys/driver_extension.h>
 
 #include "Trace.h"
@@ -64,6 +65,7 @@ extern void sysctl_os_fini(void);
 extern int  zvol_os_register_module(void);
 extern void zvol_os_deregister_module(void);
 extern void saveBuffer(void);
+extern uint32_t spl_hostid;
 
 #ifdef __clang__
 #error "This file should be compiled with MSVC not Clang"
@@ -177,6 +179,10 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 		    pRegistryPath);
 
 	zvol_os_register_module();
+
+	// Set hostid here, it will be overwritten if it is in registry
+	if (spl_hostid == 0)
+		random_get_bytes(&spl_hostid, sizeof (spl_hostid));
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "OpenZFS: Started\n"));
