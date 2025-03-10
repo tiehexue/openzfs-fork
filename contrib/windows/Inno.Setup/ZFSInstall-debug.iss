@@ -115,6 +115,10 @@ Source: "{#Root}\scripts\zfs_prepare_disk"; DestDir: "{app}"; Flags: ignoreversi
 Source: "{#Root}\cmd\zpool\compatibility.d\*"; DestDir: "{app}\compatibility.d"; Flags: ignoreversion
 Source: "{#Root}\cmd\zpool\zpool.d\*"; DestDir: "{app}\zpool.d"; Flags: ignoreversion
 Source: "{#Root}\cmd\zed\os\windows\zed.d\*"; DestDir: "{app}\zed.d"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.sys"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.cat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.inf"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
 
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
@@ -123,9 +127,7 @@ Name: "{group}\{cm:ProgramOnTheWeb,{#MyAppName}}"; Filename: "{#MyAppURL}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{sys}\sc.exe"; Parameters: "stop OpenZFS_zed"; RunOnceId: "zed-stop"; Flags: runhidden; StatusMsg: "Stopping ZED Service..."
-Filename: "{sys}\sc.exe"; Parameters: "delete OpenZFS_zed"; RunOnceId: "zed-delete"; Flags: runhidden; StatusMsg: "Removing ZED Service..."
-Filename: "{app}\ZFSInstaller.exe"; Parameters: "install .\OpenZFS.inf"; StatusMsg: "Installing Driver..."; Flags: runascurrentuser;
+Filename: "{app}\ZFSInstaller.exe"; Parameters: "install .\OpenZFS.inf .\OpenZVOL.inf"; StatusMsg: "Installing Driver..."; Flags: runascurrentuser;
 Filename: "{sys}\rundll32.exe"; Parameters: "setupapi.dll,InstallHinfSection DefaultInstall 132 {app}\zed.inf"; Flags: runhidden; StatusMsg: "Installing zed driver..."
 Filename: "{sys}\sc.exe"; Parameters: "start OpenZFS_zed"; Flags: runhidden; StatusMsg: "Starting zed Service..."
 
@@ -133,7 +135,7 @@ Filename: "{sys}\sc.exe"; Parameters: "start OpenZFS_zed"; Flags: runhidden; Sta
 Filename: "{sys}\sc.exe"; Parameters: "stop OpenZFS_zed"; RunOnceId: "zed-stop"; Flags: runhidden; StatusMsg: "Stopping ZED Service..."
 Filename: "{sys}\sc.exe"; Parameters: "delete OpenZFS_zed"; RunOnceId: "zed-delete"; Flags: runhidden; StatusMsg: "Removing ZED Service..."
 Filename: "{sys}\rundll32.exe"; Parameters: "setupapi.dll,InstallHinfSection DefaultUninstall 132 {app}\zed.inf"; RunOnceId: "zed-uninstalled"; Flags: runhidden; StatusMsg: "Uninstalling zed driver..."
-Filename: "{app}\ZFSInstaller.exe"; Parameters: "uninstall .\OpenZFS.inf"; RunOnceId: "driver"; Flags: runascurrentuser;
+Filename: "{app}\ZFSInstaller.exe"; Parameters: "uninstall .\OpenZFS.inf .\OpenZVOL.inf"; RunOnceId: "driver"; Flags: runascurrentuser;
 
 [Registry]
 Root: HKLM; Subkey: "Software\{#MyAppPublisher}\{#MyAppName}"; Flags: uninsdeletekeyifempty
