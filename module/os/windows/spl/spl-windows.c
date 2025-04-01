@@ -70,8 +70,6 @@ extern char hostname[MAXHOSTNAMELEN];
  * and most will most likely be in "root".
  */
 uint32_t spl_hostid = 0;
-ZFS_MODULE_RAW(, hostid, spl_hostid,
-    UINT, ZMOD_RW, 0, "The system hostid.");
 
 extern uchar_t zfs_vdev_protection_filter[ZFS_MODULE_STRMAX];
 ZFS_MODULE_RAW(, zfs_vdev_protection_filter, zfs_vdev_protection_filter,
@@ -769,3 +767,29 @@ spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath)
 	ZwClose(h);
 	return (newvalue);
 }
+
+static int
+param_hostid(ZFS_MODULE_PARAM_ARGS)
+{
+	uint32_t val;
+
+	*type = ZT_TYPE_UINT;
+
+	if (set == B_FALSE) {
+		*ptr = &spl_hostid;
+		*len = sizeof (spl_hostid);
+		return (0);
+	}
+
+	val = *(uint32_t *)(*ptr);
+
+	if (val == 0)
+		random_get_bytes(&spl_hostid, sizeof (spl_hostid));
+	else
+		spl_hostid = val;
+
+	return (0);
+}
+
+ZFS_MODULE_PARAM_CALL(, spl_, hostid, param_hostid,
+    param_get_uint, ZMOD_RW, "OpenZFS hostid");

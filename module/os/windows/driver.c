@@ -179,10 +179,6 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
 	zvol_os_register_module();
 
-	// Set hostid here, it will be overwritten if it is in registry
-	if (spl_hostid == 0)
-		random_get_bytes(&spl_hostid, sizeof (spl_hostid));
-
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "OpenZFS: Started\n"));
 
