@@ -2419,6 +2419,7 @@ query_volume_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	int space;
 	int error = 0;
 	uint64_t refdbytes, availbytes, usedobjs, availobjs;
+	uint64_t guid = 0ULL;
 
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	if (!zmo ||
@@ -2437,6 +2438,9 @@ query_volume_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	uint64_t sectorsz = 512ULL;
 	if (zfsvfs->z_os && zfsvfs->z_os->os_spa)
 		sectorsz = zfsvfs->z_os->os_spa->spa_min_alloc;
+
+	if (zfsvfs->z_os)
+		guid = dmu_objset_fsid_guid(zfsvfs->z_os);
 
 	switch (IrpSp->Parameters.QueryVolume.FsInformationClass) {
 
@@ -2590,7 +2594,6 @@ query_volume_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		FILE_FS_OBJECTID_INFORMATION *ffoi =
 		    Irp->AssociatedIrp.SystemBuffer;
 		RtlZeroMemory(ffoi->ObjectId, sizeof (ffoi->ObjectId));
-		uint64_t guid = dmu_objset_fsid_guid(zfsvfs->z_os);
 		RtlCopyMemory(ffoi->ObjectId, &guid, sizeof (ffoi->ObjectId));
 		RtlZeroMemory(ffoi->ExtendedInfo, sizeof (ffoi->ExtendedInfo));
 		Irp->IoStatus.Information =
@@ -2617,7 +2620,11 @@ query_volume_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		// PVPB Vpb = zmo->vpb;
 		WCHAR *wstr;
 
-		ffvi->VolumeSerialNumber = 0x19831116;
+		uint32_t serial = 0x19831116;
+		if (guid)
+			serial = (uint32_t)(guid ^ (guid >> 32));
+
+		ffvi->VolumeSerialNumber = serial;
 #if 0
 		ffvi->VolumeLabelLength =
 		    sizeof (VOLUME_LABEL) - sizeof (WCHAR);
