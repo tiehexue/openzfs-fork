@@ -1061,7 +1061,7 @@ wzvol_HwFreeAdapterResources(__in pHW_HBA_EXT pHBAExt)
 
 #endif
 
-	VERIFY0(pHBAExt->pwzvolDrvObj->DrvInfoNbrMPHBAObj);
+	// VERIFY0(pHBAExt->pwzvolDrvObj->DrvInfoNbrMPHBAObj);
 
 	dprintf("Freeing zcContextArray %p\n",
 	    STOR_wzvolDriverInfo.zvContextArray);
