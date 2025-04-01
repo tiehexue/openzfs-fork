@@ -77,6 +77,8 @@ enum manifest_install_types
 	MAN_UNINSTALL,
 };
 
+void clean_extra_installs(char *infname);
+
 int
 session_exists(void)
 {
@@ -341,7 +343,8 @@ perf_counters(char *inf_path, int type)
 	char driver_path[MAX_PATH_LEN] = { 0 };
 	strncpy_s(driver_path, inf_path, MAX_PATH_LEN);
 	char *slash = strrchr(driver_path, '\\');
-	*slash = '\0';
+	if (slash)
+		*slash = '\0';
 
 	if (path.is_absolute())
 		final_path = std::string(driver_path) + MANIFEST_FILE;
@@ -410,6 +413,10 @@ main(int argc, char *argv[])
 				ret = zvol_uninstall(argv[3]);
 			if (0 == ret)
 				return (zfs_log_session_delete());
+
+			clean_extra_installs("OpenZFS.inf");
+			clean_extra_installs("OpenZVOL.inf");
+
 			return (ret);
 		} else {
 			fprintf(stderr, "Incorrect argument usage\n");
@@ -919,3 +926,64 @@ send_zfs_ioc_unregister_fs(void)
 	return (0);
 }
 
+
+#ifndef SPDRP_INF_PATH
+#define SPDRP_INF_PATH 0x00000017  // Internal but commonly used
+#endif
+
+//
+// Sometimes we have multiple installs of OpenZFS.inf
+// so after uninstall, let's go through and remove any
+// extra installs.
+//
+void
+clean_extra_installs(char *infname)
+{
+	char infPath[MAX_PATH];
+
+	printf("Cleaning up extra installs of %s\n", infname);
+
+	snprintf(infPath, sizeof (infPath), "ROOT\\%s",
+		infname);
+	HDEVINFO deviceInfoSet = SetupDiGetClassDevsA(
+		nullptr,
+		infname,
+		nullptr,
+		DIGCF_ALLCLASSES | DIGCF_PRESENT
+	);
+
+	if (deviceInfoSet == INVALID_HANDLE_VALUE)
+		return;
+
+	SP_DEVINFO_DATA deviceInfoData = {};
+	deviceInfoData.cbSize = sizeof (SP_DEVINFO_DATA);
+
+	for (DWORD i = 0; SetupDiEnumDeviceInfo(deviceInfoSet, i, &deviceInfoData); ++i) {
+		char infPath[MAX_PATH] = {};
+
+		if (SetupDiGetDeviceRegistryPropertyA(
+			deviceInfoSet, &deviceInfoData, SPDRP_INF_PATH,
+			nullptr, (PBYTE)infPath, sizeof (infPath), nullptr)) {
+
+			if (strcasecmp(infPath, infname) == 0) {
+				// 🎯 Found a match — uninstall this driver
+
+				printf("Attempting to remove %s\n", infPath);
+
+				SP_REMOVEDEVICE_PARAMS removeParams = {};
+				removeParams.ClassInstallHeader.cbSize = sizeof (SP_CLASSINSTALL_HEADER);
+				removeParams.ClassInstallHeader.InstallFunction = DIF_REMOVE;
+				removeParams.Scope = DI_REMOVEDEVICE_GLOBAL;
+				removeParams.HwProfile = 0;
+
+				if (SetupDiSetClassInstallParams(
+					deviceInfoSet, &deviceInfoData,
+					&removeParams.ClassInstallHeader, sizeof (removeParams))) {
+
+					SetupDiCallClassInstaller(DIF_REMOVE, deviceInfoSet, &deviceInfoData);
+				}
+			}
+		}
+	}
+	SetupDiDestroyDeviceInfoList(deviceInfoSet);
+}
