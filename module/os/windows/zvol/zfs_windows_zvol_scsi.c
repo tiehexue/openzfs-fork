@@ -233,6 +233,8 @@ static inline zvol_state_t *
 wzvol_find_target(uint8_t targetid, uint8_t lun)
 {
 	wzvolContext *zv_targets = STOR_wzvolDriverInfo.zvContextArray;
+	if (!zv_targets)
+		return (NULL);
 	if (targetid < STOR_wzvolDriverInfo.MaximumNumberOfTargets &&
 	    lun < STOR_wzvolDriverInfo.MaximumNumberOfLogicalUnits) {
 		int zvidx = resolveArrayIndex(targetid, lun,
