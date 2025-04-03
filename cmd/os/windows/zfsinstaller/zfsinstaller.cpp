@@ -77,7 +77,9 @@ enum manifest_install_types
 	MAN_UNINSTALL,
 };
 
-void clean_extra_installs(char *infname);
+void clean_extra_installs(void);
+void CleanupOpenZFSDriverPackages(void);
+
 
 int
 session_exists(void)
@@ -413,9 +415,10 @@ main(int argc, char *argv[])
 				ret = zvol_uninstall(argv[3]);
 			if (0 == ret)
 				return (zfs_log_session_delete());
-
-			clean_extra_installs("OpenZFS.inf");
-			clean_extra_installs("OpenZVOL.inf");
+			printf("[1/4] Cleaning up extra installs of OpenZFS and OpenZVOL\n");
+			clean_extra_installs();
+			CleanupOpenZFSDriverPackages();
+			printf("[4/4] Completed.\n");
 
 			return (ret);
 		} else {
@@ -928,7 +931,7 @@ send_zfs_ioc_unregister_fs(void)
 
 
 #ifndef SPDRP_INF_PATH
-#define SPDRP_INF_PATH 0x00000017  // Internal but commonly used
+#define SPDRP_INF_PATH 0x00000029  // Internal but commonly used
 #endif
 
 //
@@ -937,19 +940,22 @@ send_zfs_ioc_unregister_fs(void)
 // extra installs.
 //
 void
-clean_extra_installs(char *infname)
+clean_extra_installs(void)
 {
-	char infPath[MAX_PATH];
+	char infZFS[MAX_PATH];
+	char infZVOL[MAX_PATH];
+	char infFile[512];
 
-	printf("Cleaning up extra installs of %s\n", infname);
+	printf("[2/4] Scanning DriverRepository\n");
 
-	snprintf(infPath, sizeof (infPath), "ROOT\\%s",
-		infname);
+	snprintf(infZFS, sizeof (infZFS), "ROOT\\OpenZFS");
+	snprintf(infZVOL, sizeof(infZVOL), "ROOT\\OpenZVOL");
+
 	HDEVINFO deviceInfoSet = SetupDiGetClassDevsA(
 		nullptr,
-		infname,
 		nullptr,
-		DIGCF_ALLCLASSES | DIGCF_PRESENT
+		nullptr,
+		DIGCF_ALLCLASSES /* | DIGCF_PRESENT */ // ghost entries are not present.
 	);
 
 	if (deviceInfoSet == INVALID_HANDLE_VALUE)
@@ -959,31 +965,156 @@ clean_extra_installs(char *infname)
 	deviceInfoData.cbSize = sizeof (SP_DEVINFO_DATA);
 
 	for (DWORD i = 0; SetupDiEnumDeviceInfo(deviceInfoSet, i, &deviceInfoData); ++i) {
-		char infPath[MAX_PATH] = {};
+		char hwid[MAX_PATH] = {};
 
 		if (SetupDiGetDeviceRegistryPropertyA(
-			deviceInfoSet, &deviceInfoData, SPDRP_INF_PATH,
-			nullptr, (PBYTE)infPath, sizeof (infPath), nullptr)) {
+			deviceInfoSet, &deviceInfoData, SPDRP_HARDWAREID,
+			nullptr, (PBYTE)hwid, sizeof (hwid), nullptr)) {
 
-			if (strcasecmp(infPath, infname) == 0) {
+			if (strcasecmp(infZFS, hwid) == 0 ||
+				strcasecmp(infZVOL, hwid) == 0) {
 				// 🎯 Found a match — uninstall this driver
 
-				printf("Attempting to remove %s\n", infPath);
+				printf("[2/4] Attempting to remove %s\n", hwid);
+				*infFile = 0;
 
+				// Lookup INF file, if any
+				TCHAR regSubKey[MAX_PATH];
+				if (SetupDiGetDeviceRegistryPropertyA(deviceInfoSet, &deviceInfoData,
+					SPDRP_DRIVER, NULL, (PBYTE)regSubKey, sizeof(regSubKey), NULL)) {
+
+					// Open HKLM\SYSTEM\CurrentControlSet\Control\Class\<regSubKey>
+					HKEY hKey;
+					char fullPath[MAX_PATH] = "";
+					snprintf(fullPath, sizeof(fullPath),
+						"SYSTEM\\CurrentControlSet\\Control\\Class\\%s", regSubKey);
+
+					if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, fullPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+						DWORD infSize = sizeof(infFile);
+						DWORD type = 0;
+						if (RegQueryValueExA(hKey, "InfPath", NULL, &type, (LPBYTE)infFile, &infSize) == ERROR_SUCCESS) {
+							printf("[2/4] Found INF path: %s\n", infFile);  // e.g., oem12.inf
+						}
+						RegCloseKey(hKey);
+					}
+				}
+
+				// Remove driver
 				SP_REMOVEDEVICE_PARAMS removeParams = {};
-				removeParams.ClassInstallHeader.cbSize = sizeof (SP_CLASSINSTALL_HEADER);
+				removeParams.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
 				removeParams.ClassInstallHeader.InstallFunction = DIF_REMOVE;
 				removeParams.Scope = DI_REMOVEDEVICE_GLOBAL;
 				removeParams.HwProfile = 0;
 
-				if (SetupDiSetClassInstallParams(
-					deviceInfoSet, &deviceInfoData,
-					&removeParams.ClassInstallHeader, sizeof (removeParams))) {
+				if (SetupDiSetClassInstallParamsA(deviceInfoSet, &deviceInfoData,
+					&removeParams.ClassInstallHeader, sizeof(removeParams))) {
 
-					SetupDiCallClassInstaller(DIF_REMOVE, deviceInfoSet, &deviceInfoData);
+					if (SetupDiCallClassInstaller(DIF_REMOVE, deviceInfoSet, &deviceInfoData)) {
+						printf("[2/4] Successfully removed device.\n");
+					} else {
+						printf("[2/4] Failed to call class installer: %lu\n", GetLastError());
+					}
+				} else {
+					printf("[2/4] Failed to set class install params: %lu\n", GetLastError());
+				}
+
+				// Remove INF file
+				if (*infFile) {
+					SetupUninstallOEMInfA(infFile, SUOI_FORCEDELETE, NULL);
+					printf("[2/4] Successfully removed INF file.\n");
+				}
+			} // strcasecmp
+		} // if HARDWAREID
+	} // for
+
+	SetupDiDestroyDeviceInfoList(deviceInfoSet);
+	printf("[2/4] Done.\n");
+}
+
+
+bool hasOpenZFSInstallConfig(HKEY hKey)
+{
+	DWORD type = 0;
+	DWORD dataSize = 0;
+
+	// First, query the size of the value
+	if (RegQueryValueExA(hKey, "Configurations", NULL, &type, NULL, &dataSize) != ERROR_SUCCESS)
+		return false;
+
+	if (type != REG_MULTI_SZ || dataSize == 0)
+		return false;
+
+	std::vector<char> buffer(dataSize);
+	if (RegQueryValueExA(hKey, "Configurations", NULL, NULL, (LPBYTE)buffer.data(), &dataSize) != ERROR_SUCCESS)
+		return false;
+
+	const char *ptr = buffer.data();
+	while (*ptr)
+	{
+		if (_stricmp(ptr, "OpenZFS_Install") == 0 || _stricmp(ptr, "OpenZVOL_Install") == 0)
+			return true;
+		ptr += strlen(ptr) + 1;
+	}
+
+	return false;
+}
+
+void
+CleanupOpenZFSDriverPackages(void)
+{
+	HKEY infFilesKey;
+
+	printf("[3/4] Scanning Registry for ghost OpenZFS installs...\n");
+
+	LONG res = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+		"SYSTEM\\DriverDatabase\\DriverInfFiles", 0, KEY_READ, &infFilesKey);
+
+	if (res != ERROR_SUCCESS)
+		return;
+
+	DWORD index = 0;
+	char valueName[256];
+	DWORD valueNameSize;
+
+	while (true) {
+		valueNameSize = sizeof(valueName);
+		res = RegEnumKeyExA(infFilesKey, index++, valueName, &valueNameSize, NULL, NULL, NULL, NULL);
+		if (res == ERROR_NO_MORE_ITEMS) break;
+		if (res != ERROR_SUCCESS) continue;
+
+		HKEY subKey;
+		char fullPath[512];
+		snprintf(fullPath, sizeof(fullPath), "SYSTEM\\DriverDatabase\\DriverInfFiles\\%s", valueName);
+
+		if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, fullPath, 0, KEY_READ, &subKey) == ERROR_SUCCESS) {
+			char infName[256] = {};
+			DWORD dataSize = sizeof(infName);
+			DWORD type = 0;
+
+			if (hasOpenZFSInstallConfig(subKey)) {
+				printf("[3/4] Removing OpenZFS_Install configuration: %s\n", fullPath);
+				char *justname;
+				if ((justname = strrchr(fullPath, '\\')))
+					justname++;
+				else
+					justname = fullPath;
+				SetupUninstallOEMInfA(justname, SUOI_FORCEDELETE, 0);
+			}
+
+
+			if (RegQueryValueExA(subKey, "InfName", NULL, &type, (LPBYTE)infName, &dataSize) == ERROR_SUCCESS) {
+				if (type == REG_SZ && (_stricmp(infName, "openzfs.inf") == 0 || _stricmp(infName, "openzvol.inf") == 0)) {
+					printf("[3/4] Found INF path: %s\n", valueName);
+					if (SetupUninstallOEMInfA(valueName, SUOI_FORCEDELETE, NULL)) {
+						printf("[3/4] Successfully removed INF file and driver.\n");
+					} else {
+						printf("[3/4]  Failed to remove INF: %lu\n", GetLastError());
+					}
 				}
 			}
+			RegCloseKey(subKey);
 		}
 	}
-	SetupDiDestroyDeviceInfoList(deviceInfoSet);
+	RegCloseKey(infFilesKey);
+	printf("[3/4] Done.\n");
 }
