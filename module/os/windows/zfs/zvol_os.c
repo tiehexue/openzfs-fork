@@ -102,7 +102,7 @@ register_with_openzvol(void)
 		api = ExAllocatePool(NonPagedPool, sizeof (zvol_api_t));
 		if (!api) {
 			dprintf("ZFS: Failed to allocate memory\n");
-			return;
+			goto out;
 		}
 
 		api->zvol_os_read_zv = zvol_os_read_zv;
@@ -115,7 +115,7 @@ register_with_openzvol(void)
 		    NULL, 0, FALSE, &event, &ioStatus);
 		if (!irp) {
 			dprintf("ZFS: Failed to create IRP\n");
-			return;
+			goto out;
 		}
 
 		status = IoCallDriver(openzvol_deviceObject, irp);
@@ -135,6 +135,11 @@ register_with_openzvol(void)
 		ExFreePool(api);
 
 	}
+	return;
+out:
+	ObDereferenceObject(openzvol_fileObject);
+	openzvol_fileObject = NULL;
+	openzvol_deviceObject = NULL;
 }
 
 static void
@@ -328,7 +333,7 @@ zvol_os_deregister_module(void)
 	    openzvol_deviceObject, NULL, 0, NULL, 0, FALSE, &event, &ioStatus);
 	if (!irp) {
 		dprintf("ZFS: Failed to create IRP\n");
-		return;
+		goto out;
 	}
 
 	status = IoCallDriver(openzvol_deviceObject, irp);
@@ -344,6 +349,7 @@ zvol_os_deregister_module(void)
 	}
 
 	// Finally release the fileObject, openzvol.sys can unload now.
+out:
 	ObDereferenceObject(openzvol_fileObject);
 
 	openzvol_fileObject = NULL;

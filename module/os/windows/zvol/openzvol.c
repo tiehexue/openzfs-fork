@@ -124,7 +124,12 @@ int zfs_flags = 0;
 #define	dprintf(...) \
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
 
-PDRIVER_OBJECT OPENZVOL_DriverObject = NULL;
+PDRIVER_OBJECT Storport_DriverObject = NULL;
+static PDRIVER_OBJECT OpenZVOL_DriverObject = NULL;
+static PDEVICE_OBJECT Attached = NULL;
+
+boolean_t Storport_Unloaded = FALSE;
+
 extern int zvol_start(PDRIVER_OBJECT DriverObject,
     PUNICODE_STRING pRegistryPath);
 
@@ -134,6 +139,11 @@ int (*pzvol_os_write_zv)(zvol_state_t *zv, zfs_uio_t *uio,
     int flags) = NULL;
 int (*pzvol_os_unmap)(zvol_state_t *zv, uint64_t off,
     uint64_t bytes) = NULL;
+
+NTSTATUS NTAPI IoCreateDriver(
+    _In_opt_ PUNICODE_STRING 	DriverName,
+    _In_ PDRIVER_INITIALIZE 	InitializationFunction
+);
 
 /*
  * These things are here cos we have cheated with the
@@ -162,8 +172,9 @@ zfs_inactive(void *vp, void *cr, void *ct)
 }
 
 int
-zfs_vnop_reclaim(void *)
+zfs_vnop_reclaim(void *vp)
 {
+	return (0);
 }
 
 /* end of shoddy */
@@ -198,7 +209,9 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 			pzvol_os_unmap = api->zvol_os_unmap;
 
 			// Lock this driver until deregistered
-			ObReferenceObject(OPENZVOL_DriverObject);
+			ObReferenceObject(DeviceObject);
+			Attached = IoAttachDeviceToDeviceStack(DeviceObject,
+			    Storport_DriverObject->DeviceObject);
 		}
 
 		status = STATUS_SUCCESS;
@@ -212,7 +225,14 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 			pzvol_os_unmap = NULL;
 
 			// Unlock this driver
-			ObDereferenceObject(OPENZVOL_DriverObject);
+			ObDereferenceObject(DeviceObject);
+
+			if (Attached) {
+				IoDetachDevice(Attached);
+				Attached = NULL;
+			}
+
+			OpenZVOLUnloadRoutine(OpenZVOL_DriverObject);
 		}
 		status = STATUS_SUCCESS;
 		break;
@@ -267,6 +287,22 @@ NTSTATUS
 OpenZVOLCreateCloseCleanUp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
 	UNREFERENCED_PARAMETER(DeviceObject);
+	PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
+
+	// Hold driver so we don't Unload before IRP_MJ_CLOSE
+	// has called us.
+	switch (irpSp->MajorFunction) {
+	case IRP_MJ_CREATE:
+		// Not needed actually.
+		ObReferenceObject(DeviceObject);
+		break;
+	case IRP_MJ_CLOSE:
+		ObDereferenceObject(DeviceObject);
+		break;
+	default:
+		break;
+	}
+
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	Irp->IoStatus.Information = 0;
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -279,11 +315,32 @@ OpenZVOLNoCall(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	DbgBreakPoint();
 }
 
+/*
+ * So I can not see a way to cleanly unload an IoCreateDriver() driver,
+ * as DriverUnload is not called. So we make the best effort here, and
+ * as we used NULL name for Driver it should be possible to load it again.
+ * If I figure out how, or Windows changes, this will do.
+ * This function is called with OpenZVOL_DriverObject set if it comes
+ * from DEREGISTER. It is called with NULL, if it comes from Storport.
+ * If both have been called, then we can release the Symlink.
+ */
 void
 OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 {
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "Deleting /Device/OpenZVOL\n"));
+
+	if (DriverObject == NULL) {
+		Storport_Unloaded = TRUE;
+		DriverObject = OpenZVOL_DriverObject;
+	}
+
+	// If Storport is unloaded, and DEREGISTER has been called,
+	// we proceed.
+	if (!Storport_Unloaded || pzvol_os_read_zv != NULL)
+		return;
+
+	Storport_Unloaded = FALSE;
 
 	UNICODE_STRING symbolicLinkName;
 	RtlInitUnicodeString(&symbolicLinkName, SYMBOLIC_LINK_NAME);
@@ -291,7 +348,7 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 	// Delete the symbolic link
 	IoDeleteSymbolicLink(&symbolicLinkName);
 
-	IoDeleteDevice(DriverObject->DeviceObject);
+	IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
 }
 
 NTSTATUS
@@ -300,9 +357,11 @@ OpenZVOLDriverInitialize(IN PDRIVER_OBJECT DriverObject,
 {
 	UNREFERENCED_PARAMETER(RegistryPath);
 	NTSTATUS status;
-	PDEVICE_OBJECT PhysicalDeviceObject;
 	UNICODE_STRING deviceName;
 	UNICODE_STRING symbolicLinkName;
+
+	OpenZVOL_DriverObject = DriverObject;
+
 	RtlInitUnicodeString(&deviceName, DEVICE_NAME);
 	RtlInitUnicodeString(&symbolicLinkName, SYMBOLIC_LINK_NAME);
 
@@ -342,11 +401,6 @@ OpenZVOLDriverInitialize(IN PDRIVER_OBJECT DriverObject,
 	return (STATUS_SUCCESS);
 }
 
-NTSTATUS NTAPI IoCreateDriver(
-    _In_opt_ PUNICODE_STRING 	DriverName,
-    _In_ PDRIVER_INITIALIZE 	InitializationFunction
-);
-
 NTSTATUS
 DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     _In_ PUNICODE_STRING pRegistryPath)
@@ -354,7 +408,7 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "OpenZVOL: DriverEntry\n"));
 
-	OPENZVOL_DriverObject = DriverObject;
+	Storport_DriverObject = DriverObject;
 
 	// Init storport
 	zvol_start(DriverObject, pRegistryPath);
@@ -363,7 +417,7 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	UNICODE_STRING driverName;
 	RtlInitUnicodeString(&driverName, L"\\Driver\\OpenZVOL_Helper");
 
-	NTSTATUS status = IoCreateDriver(&driverName,
+	NTSTATUS status = IoCreateDriver(NULL,
 	    &OpenZVOLDriverInitialize);
 	if (!NT_SUCCESS(status)) {
 		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,

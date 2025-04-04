@@ -62,7 +62,7 @@
 
 #define	dprintf(...) \
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
-extern PDRIVER_OBJECT OPENZVOL_DriverObject;
+extern PDRIVER_OBJECT Storport_DriverObject;
 
 /*
  * We have a list of ZVOLs, and we receive incoming (Target, Lun)
@@ -1151,7 +1151,7 @@ DiReadWriteSetup(zvol_state_t *zv, MpWkRtnAction action, zfsiodesc_t *pIo)
 	 */
 	PIO_WORKITEM pWI = (PIO_WORKITEM)ALIGN_UP_POINTER_BY(
 	    pWkRtnParms->pQueueWorkItem, 16);
-	IoInitializeWorkItem(OPENZVOL_DriverObject->DeviceObject, pWI);
+	IoInitializeWorkItem(Storport_DriverObject->DeviceObject, pWI);
 	IoQueueWorkItem(pWI, (PIO_WORKITEM_ROUTINE)bzvol_TaskQueuingWkRtn,
 	    DelayedWorkQueue, pWkRtnParms);
 

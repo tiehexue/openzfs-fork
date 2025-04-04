@@ -29,6 +29,8 @@
 #define	DEVICE_NAME L"\\Device\\OpenZVOL"
 #define	SYMBOLIC_LINK_NAME L"\\??\\OpenZVOL"
 
+void OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject);
+
 NTSYSCALLAPI NTSTATUS NTAPI ZwQuerySystemInformation(
 	ULONG SystemInformationClass,
 	PVOID SystemInformation,

@@ -36,7 +36,8 @@
 
 #include <sys/openzvol.h>
 
-extern PDRIVER_OBJECT WIN_DriverObject;
+extern boolean_t Storport_Unloaded;
+
 static pHW_HBA_EXT STOR_HBAExt = NULL;
 static wzvolDriverInfo STOR_wzvolDriverInfo;
 
@@ -1074,6 +1075,8 @@ wzvol_HwFreeAdapterResources(__in pHW_HBA_EXT pHBAExt)
 
 	if (STOR_HBAExt == pHBAExt)
 		STOR_HBAExt = NULL;
+
+	OpenZVOLUnloadRoutine(NULL);
 }
 
 void
