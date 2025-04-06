@@ -95,6 +95,7 @@
 #include <ntddk.h>
 #include <ntddstor.h>
 #include <storport.h>
+#include <fltKernel.h>
 
 #include <sys/zfs_context.h>
 #include <sys/wzvol.h>
@@ -109,6 +110,7 @@
 
 #include <sys/openzvol.h>
 
+#pragma comment(lib, "FltMgr.lib")
 
 DRIVER_INITIALIZE DriverEntry;
 DRIVER_UNLOAD OpenZFS_Fini;
@@ -126,7 +128,8 @@ int zfs_flags = 0;
 
 PDRIVER_OBJECT Storport_DriverObject = NULL;
 static PDRIVER_OBJECT OpenZVOL_DriverObject = NULL;
-static PDEVICE_OBJECT Attached = NULL;
+static PDRIVER_OBJECT StopUnload_DriverObject = NULL;
+static PDEVICE_OBJECT StopUnload_AttachedObject = NULL;
 
 boolean_t Storport_Unloaded = FALSE;
 
@@ -179,6 +182,7 @@ zfs_vnop_reclaim(void *vp)
 
 /* end of shoddy */
 
+
 NTSTATUS
 ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -210,8 +214,15 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 			// Lock this driver until deregistered
 			ObReferenceObject(DeviceObject);
-			Attached = IoAttachDeviceToDeviceStack(DeviceObject,
-			    Storport_DriverObject->DeviceObject);
+
+			if (StopUnload_DriverObject->DeviceObject &&
+			    Storport_DriverObject->DeviceObject)
+				StopUnload_AttachedObject =
+				    IoAttachDeviceToDeviceStack(
+				    StopUnload_DriverObject->DeviceObject,
+				    Storport_DriverObject->DeviceObject);
+			dprintf("IoAttachDeviceToDeviceStack said %p\n",
+			    StopUnload_AttachedObject);
 		}
 
 		status = STATUS_SUCCESS;
@@ -227,10 +238,9 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 			// Unlock this driver
 			ObDereferenceObject(DeviceObject);
 
-			if (Attached) {
-				IoDetachDevice(Attached);
-				Attached = NULL;
-			}
+			if (StopUnload_AttachedObject)
+				IoDetachDevice(StopUnload_AttachedObject);
+			StopUnload_AttachedObject = NULL;
 
 			OpenZVOLUnloadRoutine(OpenZVOL_DriverObject);
 		}
@@ -312,18 +322,12 @@ OpenZVOLCreateCloseCleanUp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 NTSTATUS
 OpenZVOLNoCall(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-	DbgBreakPoint();
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = 0;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	return (STATUS_SUCCESS);
 }
 
-/*
- * So I can not see a way to cleanly unload an IoCreateDriver() driver,
- * as DriverUnload is not called. So we make the best effort here, and
- * as we used NULL name for Driver it should be possible to load it again.
- * If I figure out how, or Windows changes, this will do.
- * This function is called with OpenZVOL_DriverObject set if it comes
- * from DEREGISTER. It is called with NULL, if it comes from Storport.
- * If both have been called, then we can release the Symlink.
- */
 void
 OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 {
@@ -345,9 +349,14 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 	UNICODE_STRING symbolicLinkName;
 	RtlInitUnicodeString(&symbolicLinkName, SYMBOLIC_LINK_NAME);
 
+	UNICODE_STRING symbolicLinkName2;
+	RtlInitUnicodeString(&symbolicLinkName2, STOP_UNLOAD_LINK_NAME);
+
 	// Delete the symbolic link
 	IoDeleteSymbolicLink(&symbolicLinkName);
+	IoDeleteSymbolicLink(&symbolicLinkName2);
 
+	IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
 	IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
 }
 
@@ -379,10 +388,8 @@ OpenZVOLDriverInitialize(IN PDRIVER_OBJECT DriverObject,
 		return (status);
 	}
 
-#if 1
 	for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++)
 		DriverObject->MajorFunction[i] = OpenZVOLNoCall;
-#endif
 
 	DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] =
 	    ControlDeviceIoctlHandler;
@@ -402,6 +409,66 @@ OpenZVOLDriverInitialize(IN PDRIVER_OBJECT DriverObject,
 }
 
 NTSTATUS
+StopUnload_Relay(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+
+	// dprintf("%s: Major %d Minor %d\n",
+	//    __func__, irpStack->MajorFunction, irpStack->MinorFunction);
+
+	if (StopUnload_AttachedObject)
+		return (IoCallDriver(StopUnload_AttachedObject, Irp));
+
+	// The device is not attached, complete the IRP and return an error
+	Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+	Irp->IoStatus.Information = 0;  // No data has been processed
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);  // Complete the IRP
+	return (STATUS_INVALID_DEVICE_REQUEST);
+}
+
+NTSTATUS
+StopUnloadDriver(IN PDRIVER_OBJECT DriverObject,
+    IN PUNICODE_STRING RegistryPath)
+{
+	UNREFERENCED_PARAMETER(RegistryPath);
+	NTSTATUS status;
+	UNICODE_STRING deviceName;
+	UNICODE_STRING symbolicLinkName;
+
+	StopUnload_DriverObject = DriverObject;
+
+	RtlInitUnicodeString(&deviceName, STOP_UNLOAD_NAME);
+	RtlInitUnicodeString(&symbolicLinkName, STOP_UNLOAD_LINK_NAME);
+
+	PDEVICE_OBJECT deviceObject;
+	status = IoCreateDevice(DriverObject, 0, &deviceName,
+	    FILE_DEVICE_UNKNOWN, 0, FALSE, &deviceObject);
+
+	if (!NT_SUCCESS(status))
+		return (status);
+
+	status = IoCreateSymbolicLink(&symbolicLinkName, &deviceName);
+
+	if (!NT_SUCCESS(status)) {
+		IoDeleteDevice(deviceObject);
+		return (status);
+	}
+
+	for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++) {
+		DriverObject->MajorFunction[i] = NULL;
+		if (Storport_DriverObject->MajorFunction[i] != NULL)
+			DriverObject->MajorFunction[i] = StopUnload_Relay;
+	}
+
+	deviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+	    "Created /Device/StopUnload\n"));
+
+	return (STATUS_SUCCESS);
+}
+
+NTSTATUS
 DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     _In_ PUNICODE_STRING pRegistryPath)
 {
@@ -413,20 +480,32 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	// Init storport
 	zvol_start(DriverObject, pRegistryPath);
 
-	// Init minimal device object for communication
-	UNICODE_STRING driverName;
-	RtlInitUnicodeString(&driverName, L"\\Driver\\OpenZVOL_Helper");
-
+	/*
+	 * So I have had a difficult time trying to stop Storport from
+	 * Unloading so eagerly. Even when disks are in use and mounted,
+	 * it just unloads if asked. So we create this fake Device here
+	 * which we attach to Storport. This appears to make PnpMgr from
+	 * calling Unload. Then when we finally detach, Storport is free
+	 * to unload. Such a simple thing, so it is surprising that there
+	 * is no Microsoft way to prevent unloading.
+	 */
 	NTSTATUS status = IoCreateDriver(NULL,
+	    &StopUnloadDriver);
+	if (!NT_SUCCESS(status)) {
+		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+		    "Failed to create StopUnloadDriver: %08X\n",
+		    status));
+	}
+
+	// Init minimal device object for communication last,
+	// so REGISTER comes last.
+	status = IoCreateDriver(NULL,
 	    &OpenZVOLDriverInitialize);
 	if (!NT_SUCCESS(status)) {
 		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 		    "Failed to create OpenZVOL helper driver: %08X\n",
 		    status));
 	}
-
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-	    "OpenZVOL: Started\n"));
 
 	return (STATUS_SUCCESS);
 }

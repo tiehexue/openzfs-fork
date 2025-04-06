@@ -1231,7 +1231,7 @@ zfs_windows_mount(zfs_cmd_t *zc)
 		IoDeleteDevice(diskDeviceObject);
 
 		retry++;
-		if (retry >= 3) {
+		if (retry >= 4) {
 			dprintf("Too many retries, giving up\n");
 			return (STATUS_MOUNT_POINT_NOT_RESOLVED);
 		}

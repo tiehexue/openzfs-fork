@@ -28,6 +28,8 @@
 
 #define	DEVICE_NAME L"\\Device\\OpenZVOL"
 #define	SYMBOLIC_LINK_NAME L"\\??\\OpenZVOL"
+#define	STOP_UNLOAD_NAME L"\\Device\\StopUnload"
+#define	STOP_UNLOAD_LINK_NAME L"\\??\\StopUnload"
 
 void OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject);
 
