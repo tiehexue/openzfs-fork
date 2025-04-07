@@ -8280,11 +8280,6 @@ _Function_class_(DRIVER_DISPATCH)
 
 	VERIFY3U(saveIRQL, ==, KeGetCurrentIrql());
 
-	if (IrpSp && IrpSp->FileObject &&
-	    IrpSp->FileObject->Vpb == NULL) {
-		xprintf("Neat, its NULL\n");
-		IrpSp->FileObject->Vpb = DeviceObject->Vpb;
-	}
 	return (Status);
 }
 
