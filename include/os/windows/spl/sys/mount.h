@@ -127,6 +127,9 @@ struct mount
 	uint64_t volume_opens;
 	PVPB vpb;
 
+	PFILE_OBJECT MountMgr_FileObject;
+	PDEVICE_OBJECT MountMgr_DeviceObject;
+
 	uint64_t mountflags;
 
 	KEVENT volume_removed_event;

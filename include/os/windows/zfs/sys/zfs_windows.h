@@ -184,7 +184,7 @@ void zfs_load_ntsecurity(struct vnode *vp);
 NTSTATUS merge_security(vnode_t *vp, PACCESS_STATE as);
 struct vnode *zfs_parent(struct vnode *);
 extern PVOID MapUserBuffer(IN OUT PIRP Irp);
-extern void mount_add_device(PDEVICE_OBJECT DriverObject,
+extern void mount_add_device(PDRIVER_OBJECT DriverObject,
     PDEVICE_OBJECT PhysicalDeviceObject);
 extern void zfs_windows_unmount_free(PUNICODE_STRING symlink_name);
 extern void zfs_release_mount(mount_t *zmo);
