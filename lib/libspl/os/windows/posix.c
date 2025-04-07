@@ -685,7 +685,7 @@ gethostid(void)
 		return (0UL);
 
 	len = sizeof (hostid);
-	Status = RegQueryValueEx(key, "hostid", NULL, &type,
+	Status = RegQueryValueEx(key, "spl_hostid", NULL, &type,
 	    (LPBYTE)&hostid, &len);
 	if (Status != ERROR_SUCCESS)
 		hostid = 0;

@@ -65,7 +65,6 @@ extern void sysctl_os_fini(void);
 extern int  zvol_os_register_module(void);
 extern void zvol_os_deregister_module(void);
 extern void saveBuffer(void);
-extern uint32_t spl_hostid;
 
 #ifdef __clang__
 #error "This file should be compiled with MSVC not Clang"

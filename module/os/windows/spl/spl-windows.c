@@ -776,6 +776,10 @@ param_hostid(ZFS_MODULE_PARAM_ARGS)
 	*type = ZT_TYPE_UINT;
 
 	if (set == B_FALSE) {
+
+		if (spl_hostid == 0)
+			random_get_bytes(&spl_hostid, sizeof (spl_hostid));
+
 		*ptr = &spl_hostid;
 		*len = sizeof (spl_hostid);
 		return (0);
@@ -783,10 +787,7 @@ param_hostid(ZFS_MODULE_PARAM_ARGS)
 
 	val = *(uint32_t *)(*ptr);
 
-	if (val == 0)
-		random_get_bytes(&spl_hostid, sizeof (spl_hostid));
-	else
-		spl_hostid = val;
+	spl_hostid = val;
 
 	return (0);
 }
