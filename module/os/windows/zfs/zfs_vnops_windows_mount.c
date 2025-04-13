@@ -1835,14 +1835,14 @@ zfs_vnop_mount(PDEVICE_OBJECT DiskDevice, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	// The "/OpenZFS" FILE_DEVICE_DISK_FILE_SYSTEM "masterobj"
 	if (DiskDevice != DriverExtension->fsDiskDeviceObject) {
 		dprintf("No fsDiskDeviceObject object, unloading?\n");
-		return (STATUS_INVALID_DEVICE_REQUEST);
+		return (STATUS_UNRECOGNIZED_VOLUME);
 	}
 
 	DeviceToMount = IrpSp->Parameters.MountVolume.DeviceObject;
 	if (DeviceToMount->DeviceType != FILE_DEVICE_DISK) {
 		dprintf("Not FILE_DEVICE_DISK object -- ignoring\n");
 		// Not a disk device, pass it down
-		return (STATUS_INVALID_DEVICE_REQUEST);
+		return (STATUS_UNRECOGNIZED_VOLUME);
 	}
 
 	mount_t *dcb = NULL;
