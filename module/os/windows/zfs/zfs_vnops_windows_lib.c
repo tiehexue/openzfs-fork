@@ -5803,13 +5803,11 @@ ioctl_get_gpt_attributes(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
-	if (zfsvfs == NULL)
-		return (STATUS_INVALID_PARAMETER);
 
 	Irp->IoStatus.Information =
 	    sizeof (VOLUME_GET_GPT_ATTRIBUTES_INFORMATION);
 
-	if (zfsvfs->z_rdonly)
+	if (zfsvfs && zfsvfs->z_rdonly)
 		vggai->GptAttributes =
 		    GPT_BASIC_DATA_ATTRIBUTE_READ_ONLY;
 	else
@@ -5907,31 +5905,35 @@ ioctl_disk_get_drive_geometry(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_INVALID_PARAMETER);
 	}
 
-	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
-	if (zfsvfs == NULL)
-		return (STATUS_INVALID_PARAMETER);
-
-	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
-		return (error);  // This returns EIO if fail
-
-	uint64_t refdbytes, availbytes, usedobjs, availobjs;
-	dmu_objset_space(zfsvfs->z_os,
-	    &refdbytes, &availbytes, &usedobjs, &availobjs);
-
 	DISK_GEOMETRY *diskGeometry = Irp->AssociatedIrp.SystemBuffer;
-	uint64_t TotalSizeBytes = availbytes + refdbytes;
 	unsigned long TracksPerCylinder = 255;
 	unsigned long SectorsPerTrack = 63;
 	unsigned long BytesPerSector = 512;
+	unsigned long long Cylinders = 512;
 
-	// Calculate total sectors
-	unsigned long long TotalSectors = TotalSizeBytes / BytesPerSector;
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	if (zfsvfs != NULL) {
 
-	// Calculate sectors per cylinder
-	unsigned long SectorsPerCylinder = TracksPerCylinder * SectorsPerTrack;
+		if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+			return (error); // This returns EIO if fail
 
-	// Calculate number of cylinders
-	unsigned long long Cylinders = TotalSectors / SectorsPerCylinder;
+		uint64_t refdbytes, availbytes, usedobjs, availobjs;
+		dmu_objset_space(zfsvfs->z_os,
+		    &refdbytes, &availbytes, &usedobjs, &availobjs);
+
+		uint64_t TotalSizeBytes = availbytes + refdbytes;
+
+		// Calculate total sectors
+		unsigned long long TotalSectors =
+		    TotalSizeBytes / BytesPerSector;
+
+		// Calculate sectors per cylinder
+		unsigned long SectorsPerCylinder =
+		    TracksPerCylinder * SectorsPerTrack;
+
+		// Calculate number of cylinders
+		Cylinders = TotalSectors / SectorsPerCylinder;
+	}
 
 	// Populate the DISK_GEOMETRY structure
 	diskGeometry->Cylinders.QuadPart = Cylinders;
@@ -5939,7 +5941,10 @@ ioctl_disk_get_drive_geometry(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	diskGeometry->SectorsPerTrack = SectorsPerTrack;
 	diskGeometry->BytesPerSector = BytesPerSector;
 	diskGeometry->MediaType = FixedMedia;
-	zfs_exit(zfsvfs, FTAG);
+
+	if (zfsvfs != NULL) {
+		zfs_exit(zfsvfs, FTAG);
+	}
 
 	Irp->IoStatus.Information = sizeof (DISK_GEOMETRY);
 	return (STATUS_SUCCESS);

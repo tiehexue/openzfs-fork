@@ -477,7 +477,7 @@ getfsstat(struct statfs *buf, int bufsize, int flags)
 
 			if (fzvm)
 				free(fzvm);
-
+			fzvm = NULL;
 			UID = NULL;
 			// If it is mounted, add node.
 			if (buf->f_mntonname[0] != 0) {

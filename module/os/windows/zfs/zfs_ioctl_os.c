@@ -768,6 +768,9 @@ zfs_vfs_rele(zfsvfs_t *zfsvfs)
 
 static uint_t zfsdev_private_tsd;
 
+uint64_t zfs_mount_reentry = 0; // Quick test, to avoid tsd AVL code
+uint_t zfs_mount_reentry_tsd; // Used to know if THIS thread is reentry
+
 dev_t
 zfsdev_get_dev(void)
 {
@@ -1405,6 +1408,7 @@ zfsdev_attach(void)
 		goto openzfs_os_failed;
 
 	tsd_create(&zfsdev_private_tsd, NULL);
+	tsd_create(&zfs_mount_reentry_tsd, NULL);
 
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "ZFS: Loaded module %s, "
@@ -1473,6 +1477,7 @@ zfsdev_detach(void)
 	UnregisterZFSinCachePerf();
 
 	tsd_destroy(&zfsdev_private_tsd);
+	tsd_destroy(&zfs_mount_reentry_tsd);
 
 	openzfs_fini_os();
 	zstd_fini();

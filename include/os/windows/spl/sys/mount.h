@@ -116,6 +116,7 @@ struct mount
 	UNICODE_STRING name;
 	UNICODE_STRING uuid;
 	UNICODE_STRING mountpoint;
+	UNICODE_STRING dosdevices_mountpoint;
 	UNICODE_STRING deviceInterfaceName;
 	UNICODE_STRING fsInterfaceName;
 	UNICODE_STRING volumeInterfaceName;
@@ -126,9 +127,6 @@ struct mount
 	boolean_t justDriveLetter;
 	uint64_t volume_opens;
 	PVPB vpb;
-
-	PFILE_OBJECT MountMgr_FileObject;
-	PDEVICE_OBJECT MountMgr_DeviceObject;
 
 	uint64_t mountflags;
 

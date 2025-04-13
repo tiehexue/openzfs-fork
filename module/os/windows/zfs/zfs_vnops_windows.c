@@ -8103,6 +8103,15 @@ _Function_class_(DRIVER_DISPATCH)
 	return (Status);
 }
 
+void
+call_dispatcher(_In_ PVOID Context)
+{
+	PIRP Irp = (PIRP) Context;
+	PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+
+	dispatcher(IrpSp->DeviceObject, Irp);
+}
+
 /*
  * ALL ioctl requests come in here, and we do the Windows specific
  * work to handle IRPs then we sort out the type of request
@@ -8148,6 +8157,22 @@ _Function_class_(DRIVER_DISPATCH)
 	    __func__, IrpSp->MajorFunction, IrpSp->MinorFunction,
 	    major2str(IrpSp->MajorFunction, IrpSp->MinorFunction),
 	    Irp->Type, IrpSp->FileObject);
+
+
+	/*
+	 * Mount can re-enter and cause hassles, so let's detect
+	 * that here, and spawn off a WorkItem instead.
+	 */
+	if (zfs_mount_reentry &&
+	    tsd_get(zfs_mount_reentry_tsd) == (void *)1) {
+		// dprintf("Re-entry detected\n");
+		// xprintf("Re-entry detected\n");
+
+		IoMarkIrpPending(Irp);
+		if (taskq_dispatch(system_taskq, call_dispatcher, Irp,
+		    TQ_SLEEP))
+			return (STATUS_PENDING);
+	}
 
 	KIRQL saveIRQL;
 	saveIRQL = KeGetCurrentIrql();

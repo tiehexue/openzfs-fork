@@ -76,6 +76,8 @@ extern uint64_t zfs_module_busy;
 
 extern CACHE_MANAGER_CALLBACKS CacheManagerCallbacks;
 
+extern uint64_t zfs_mount_reentry;
+extern uint_t zfs_mount_reentry_tsd;
 
 extern NTSTATUS dev_ioctl(PDEVICE_OBJECT DeviceObject, ULONG ControlCode,
     PVOID InputBuffer, ULONG InputBufferSize, PVOID OutputBuffer,
