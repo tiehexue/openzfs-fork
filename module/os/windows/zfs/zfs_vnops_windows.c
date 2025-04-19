@@ -6263,14 +6263,17 @@ merge_security(vnode_t *vp, PACCESS_STATE as)
 #endif
 
 	// We probably do not have an old sd, but just in case.
-	PSECURITY_DESCRIPTOR oldsd;
-	oldsd = vnode_security(vp);
+	if (NT_SUCCESS(Status)) {
 
-	vnode_setsecurity(vp, new_sd);
-	zfs_save_ntsecurity(vp);
+		PSECURITY_DESCRIPTOR oldsd;
+		oldsd = vnode_security(vp);
 
-	if (oldsd)
-		ExFreePool(oldsd);
+		vnode_setsecurity(vp, new_sd);
+		zfs_save_ntsecurity(vp);
+
+		if (oldsd)
+			ExFreePool(oldsd);
+	}
 
 	return (Status);
 }
