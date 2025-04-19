@@ -1453,11 +1453,54 @@ wosix_fstat_blk(int fd, struct _stat64 *st)
 	return (-1); // errno?
 }
 
+/*
+ * There are issues with USB flash memory, attempting large reads will
+ * cause disconnect and other errors, but there does not appear to be
+ * a way to find that out in advance. There is surely a better way?
+ */
+int
+get_maximum_transfer_length(int fd, int len)
+{
+	STORAGE_PROPERTY_QUERY query2 = {
+	    .PropertyId = StorageDeviceProperty,
+	    .QueryType = PropertyStandardQuery
+	};
+
+	BYTE buffer[1024];
+	DWORD bytesReturned;
+
+	BOOL ook = DeviceIoControl(fd,
+	    IOCTL_STORAGE_QUERY_PROPERTY,
+	    &query2, sizeof (query2),
+	    &buffer, sizeof (buffer),
+	    &bytesReturned,
+	    NULL);
+
+	if (ook) {
+		STORAGE_DEVICE_DESCRIPTOR *desc =
+		    (STORAGE_DEVICE_DESCRIPTOR *)buffer;
+		if (desc->BusType == BusTypeUsb) {
+			static int last_fd;
+			if (last_fd != fd) {
+				last_fd = fd;
+				printf("Device is USB. Restrict I/O size.\n");
+			}
+			return (512);
+		}
+	} else {
+		printf("Failed to query device: %lu\n", GetLastError());
+	}
+
+	return (len);
+}
+
+
 // os specific files can call this directly.
 int
 pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset)
 {
 	DWORD red;
+	int total_red = 0;
 	LARGE_INTEGER large;
 	LARGE_INTEGER lnew;
 	// This code does all seeks based on "current" so we can
@@ -1473,17 +1516,31 @@ pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset)
 
 	boolean_t ok;
 
-	ok = ReadFile(h, buf, nbyte, &red, NULL);
+	int chunksize;
+	chunksize = get_maximum_transfer_length(h, nbyte);
 
-	if (!ok) {
-		red = GetLastError();
-		red = -red;
+	// We need to chunk reads for USB devices
+	while (nbyte > 0) {
+
+		int toread = MIN(nbyte, chunksize);
+
+		ok = ReadFile(h, buf, toread, &red, NULL);
+
+		if (!ok || red == 0) {
+			red = GetLastError();
+			total_red = -red;
+			break;
+		}
+		buf += red;
+		nbyte -= red;
+		total_red += red;
+//		fprintf(stderr, "ReadFile %d\n", red); fflush(stderr);
 	}
 
 	// Restore position
 	SetFilePointerEx(h, lnew, NULL, FILE_BEGIN);
 
-	return (red);
+	return (total_red);
 }
 
 int

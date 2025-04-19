@@ -148,6 +148,9 @@ zpool_read_label_win(HANDLE h, off_t offset, uint64_t len,
 	*config = NULL;
 
 	drivesize = len;
+	if (offset > len)
+		return (-1);
+
 	size = P2ALIGN_TYPED(drivesize, sizeof (vdev_label_t), uint64_t);
 
 	if ((label = malloc(sizeof (vdev_label_t))) == NULL)
@@ -590,11 +593,13 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		if (add &&
 		    partitions->PartitionEntry[i].PartitionLength.
 		    QuadPart > SPA_MINDEVSIZE) {
+
 			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
 
 			error = asprintf(&slice->rn_name,
 			    "\\\\?\\Harddisk%uPartition%u",
 			    diskNumber.DeviceNumber, i);
+
 			if (error == -1) {
 				free(slice);
 				continue;
@@ -621,7 +626,6 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			// it would be possible that the
 			// disk itself contains a pool, so let's check that
 			if (partitions->PartitionCount == 0) {
-
 				slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
 
 				uint64_t size = GetFileDriveSize(disk);
@@ -714,6 +718,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			    vtoc->efi_parts[i].p_start * vtoc->efi_lbasize,
 			    vtoc->efi_parts[i].p_size * vtoc->efi_lbasize,
 			    deviceInterfaceDetailData->DevicePath);
+
 			if (error == -1) {
 				free(slice);
 				continue;

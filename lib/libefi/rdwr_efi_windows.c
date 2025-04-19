@@ -1178,6 +1178,101 @@ efi_use_whole_disk(int fd)
 	return (0);
 }
 
+void
+process_volumes(HANDLE hDisk)
+{
+	// Step 1: Get physical disk number
+	STORAGE_DEVICE_NUMBER devNum;
+	DWORD bytesReturned;
+	if (!DeviceIoControl(hDisk,
+	    IOCTL_STORAGE_GET_DEVICE_NUMBER,
+	    NULL, 0,
+	    &devNum, sizeof (devNum),
+	    &bytesReturned, NULL)) {
+		printf("Failed to get device number: %lu\n",
+		    GetLastError());
+		return;
+	}
+
+	DWORD targetDiskNumber = devNum.DeviceNumber;
+	fprintf(stderr, "Disk number: %lu\n", targetDiskNumber);
+
+	// Step 2: Enumerate all volumes
+	WCHAR volumeName[MAX_PATH];
+	HANDLE hFind = FindFirstVolumeW(volumeName,
+	    ARRAYSIZE(volumeName));
+	if (hFind == INVALID_HANDLE_VALUE) {
+		fprintf(stderr, "FindFirstVolumeW failed: %lu\n",
+		    GetLastError());
+		return;
+	}
+
+	do {
+		// Remove trailing backslash for CreateFileW
+		size_t len = wcslen(volumeName);
+		if (volumeName[len - 1] == L'\\') {
+			volumeName[len - 1] = L'\0';
+		}
+
+		HANDLE hVol = CreateFileW(volumeName,
+		    GENERIC_READ | GENERIC_WRITE,
+		    FILE_SHARE_READ | FILE_SHARE_WRITE,
+		    NULL, OPEN_EXISTING, 0, NULL);
+
+		if (hVol == INVALID_HANDLE_VALUE)
+			continue;
+
+		// Step 3: Check disk extents
+		VOLUME_DISK_EXTENTS extents;
+		if (!DeviceIoControl(hVol,
+		    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+		    NULL, 0,
+		    &extents, sizeof (extents),
+		    &bytesReturned, NULL)) {
+			CloseHandle(hVol);
+			continue;
+		}
+
+		for (DWORD i = 0;
+		    i < extents.NumberOfDiskExtents;
+		    ++i) {
+			if (extents.Extents[i].DiskNumber ==
+			    targetDiskNumber) {
+				fwprintf(stderr,
+				    L"Volume %s is on PHYSICALDRIVE%lu\n",
+				    volumeName, targetDiskNumber);
+
+				// Try to lock and dismount
+				if (DeviceIoControl(hVol, FSCTL_LOCK_VOLUME,
+				    NULL, 0, NULL, 0, &bytesReturned, NULL)) {
+					fprintf(stderr, "  Locked.\n");
+					if (DeviceIoControl(hVol,
+					    FSCTL_DISMOUNT_VOLUME, NULL, 0,
+					    NULL, 0, &bytesReturned, NULL)) {
+						fprintf(stderr,
+						    "  Dismounted.\n");
+					} else {
+						fprintf(stderr,
+						    "  Dismount: %lu\n",
+						    GetLastError());
+					}
+				} else {
+					fprintf(stderr,
+					    "  Failed to lock: %lu\n",
+					    GetLastError());
+				}
+			}
+		}
+
+		CloseHandle(hVol);
+
+		// Restore trailing slash
+		volumeName[len - 1] = L'\\';
+	} while (FindNextVolumeW(hFind, volumeName, ARRAYSIZE(volumeName)));
+
+	FindVolumeClose(hFind);
+}
+
 
 /*
  * write EFI label and backup label
@@ -1238,6 +1333,11 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	    vtoc->efi_lbasize, UMEM_DEFAULT);
 	if (dk_ioc.dki_data == NULL)
 		return (VT_ERROR);
+
+
+	// Tell Windows to bugger off, we are about to wipe this
+	process_volumes(fd);
+
 
 	memset(dk_ioc.dki_data, 0, dk_ioc.dki_length);
 	efi = dk_ioc.dki_data;
@@ -1382,6 +1482,16 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	/* write the PMBR */
 	(void) write_pmbr(fd, vtoc);
 	umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
+
+	// Tell Windows we have changed partitions
+	DWORD bytesReturned;
+	DeviceIoControl(
+	    fd,
+	    IOCTL_DISK_UPDATE_PROPERTIES,
+	    NULL, 0,
+	    NULL, 0,
+	    &bytesReturned,
+	    NULL);
 
 	return (0);
 }
