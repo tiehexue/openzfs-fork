@@ -102,26 +102,74 @@ static int
 read_disk_info(int fd, diskaddr_t *capacity, uint_t *lbsize)
 {
 	DISK_GEOMETRY_EX geometry_ex;
-	DWORD len;
+	DWORD len = 0;
 
-	LARGE_INTEGER large;
 	if (DeviceIoControl(ITOH(fd), IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0,
 	    &geometry_ex, sizeof (geometry_ex), &len, NULL)) {
 
 		*lbsize = (uint_t)geometry_ex.Geometry.BytesPerSector;
 		*capacity = (diskaddr_t)geometry_ex.DiskSize.QuadPart;
-		*capacity /= *lbsize; // Capacity is in # blocks
-		return (0);
+		goto done;
 	}
 
+	if (*capacity > 0 &&
+	    *lbsize > 0)
+		goto done;
+
+	if (*capacity > 0)
+		goto gotsize;
+
+	GET_LENGTH_INFORMATION lengthInfo = { 0 };
+	len = 0;
+
+	if (DeviceIoControl(
+	    ITOH(fd),
+	    IOCTL_DISK_GET_LENGTH_INFO,
+	    NULL, 0,
+	    &lengthInfo, sizeof (lengthInfo),
+	    &len,
+	    NULL)) {
+		*capacity = lengthInfo.Length.QuadPart;
+	}
+
+gotsize:
+	// We need to lookup sectorSize;
+	if (*lbsize == 0) {
+
+		STORAGE_PROPERTY_QUERY query = {
+		    .PropertyId = StorageAccessAlignmentProperty,
+		    .QueryType = PropertyStandardQuery
+		};
+
+		STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR align = { 0 };
+		len = 0;
+
+		if (DeviceIoControl(
+		    ITOH(fd),
+		    IOCTL_STORAGE_QUERY_PROPERTY,
+		    &query, sizeof(query),
+		    &align, sizeof(align),
+		    &len,
+		    NULL)) {
+			*lbsize = align.BytesPerLogicalSector;
+		}
+	}
+
+	if (*lbsize == 0) {
+		*lbsize = 512;
+		fprintf(stderr, "Assuming 512 byte sector size\n");
+	}
+
+done:
+	*capacity /= *lbsize; // Capacity is in # blocks
 	return (0);
 }
 
 static int
 efi_get_info(int fd, struct dk_cinfo *dki_info)
 {
-	int rval = 0;
 #if defined(__linux__)
+	int rval = 0;
 	char *path;
 	char *dev_path;
 
@@ -449,6 +497,22 @@ efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
 	return (rval);
 }
 
+static uint32_t
+quick_crc32(const void *data, size_t len)
+{
+	const uint8_t *p = (const uint8_t *)data;
+	uint32_t crc = 0xFFFFFFFF;
+
+	while (len--) {
+		crc ^= *p++;
+		for (int k = 0; k < 8; k++) {
+			crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+		}
+	}
+
+	return ~crc;
+}
+
 static int
 efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 {
@@ -457,7 +521,7 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 	diskaddr_t capacity;
 	uint_t lbsize;
-
+	usleep(100);
 	/*
 	 * When the IO is not being performed in kernel as an ioctl we need
 	 * to know the sector size so we can seek to the proper byte offset.
@@ -473,6 +537,7 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 
 	switch (cmd) {
 	case DKIOCGETEFI:
+	{
 		if (lbsize == 0) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCGETEFI assuming "
@@ -481,33 +546,52 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 			lbsize = DEV_BSIZE;
 		}
 
-		error = lseek(fd, dk_ioc->dki_lba * lbsize, SEEK_SET);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCGETEFI lseek "
-				    "error: %d\n", errno);
-			return (error);
+		if (efi_debug)
+			fprintf(stderr, "DKIOCGETEFI: lba %llu, sectorsize %d, length %lld\n",
+			    (long long)dk_ioc->dki_lba, lbsize, dk_ioc->dki_length);
+
+		int block = dk_ioc->dki_lba;
+		size_t total_iosize = dk_ioc->dki_length;
+		size_t total_done = 0;
+
+		while (total_iosize > 0) {
+			int iosize = MIN(total_iosize, lbsize);
+
+			error = lseek(fd, block * lbsize, SEEK_SET);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr, "DKIOCGETEFI lseek "
+					    "error: %d\n", errno);
+				return (error);
+			}
+
+			error = read(fd, data, iosize);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr, "DKIOCGETEFI read "
+					    "error: %d\n", errno);
+				return (error);
+			}
+
+			block++;
+			data += iosize;
+			total_iosize -= iosize;
+			total_done += iosize;
 		}
 
-		error = read(fd, data, dk_ioc->dki_length);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCGETEFI read "
-				    "error: %d\n", errno);
-			return (error);
-		}
-
-		if (error != dk_ioc->dki_length) {
+		if (total_done != dk_ioc->dki_length) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCGETEFI short "
-				    "read of %d bytes\n", error);
+				    "read of %zu bytes\n", total_done);
 			errno = EIO;
 			return (-1);
 		}
 		error = 0;
 		break;
+	}
 
 	case DKIOCSETEFI:
+	{
 		if (lbsize == 0) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCSETEFI unknown "
@@ -516,26 +600,43 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 			return (-1);
 		}
 
-		error = lseek(fd, dk_ioc->dki_lba * lbsize, SEEK_SET);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCSETEFI lseek "
-				    "error: %d\n", errno);
-			return (error);
+		if (efi_debug)
+			fprintf(stderr, "DKIOCSETEFI: lba %llu, sectorsize %d, length %lld\n",
+			    (long long)dk_ioc->dki_lba, lbsize, dk_ioc->dki_length);
+
+		int block = dk_ioc->dki_lba;
+		size_t total_iosize = dk_ioc->dki_length;
+		size_t total_done = 0;
+
+		while (total_iosize > 0) {
+			int iosize = MIN(total_iosize, lbsize);
+
+			error = lseek(fd, block * lbsize, SEEK_SET);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr, "DKIOCSETEFI lseek "
+					    "error: %d\n", errno);
+				return (error);
+			}
+
+			error = write(fd, data, iosize);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr, "DKIOCSETEFI write "
+					    "error: %d\n", errno);
+				return (error);
+			}
+
+			block++;
+			data += iosize;
+			total_iosize -= iosize;
+			total_done += iosize;
 		}
 
-		error = write(fd, data, dk_ioc->dki_length);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCSETEFI write "
-				    "error: %d\n", errno);
-			return (error);
-		}
-
-		if (error != dk_ioc->dki_length) {
+		if (total_done != dk_ioc->dki_length) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCSETEFI short "
-				    "write of %d bytes\n", error);
+				    "write of %zu bytes\n", total_done);
 			errno = EIO;
 			return (-1);
 		}
@@ -553,6 +654,7 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 #endif
 		error = 0;
 		break;
+	}
 
 	default:
 		if (efi_debug)
@@ -1195,7 +1297,6 @@ process_volumes(HANDLE hDisk)
 	}
 
 	DWORD targetDiskNumber = devNum.DeviceNumber;
-	fprintf(stderr, "Disk number: %lu\n", targetDiskNumber);
 
 	// Step 2: Enumerate all volumes
 	WCHAR volumeName[MAX_PATH];
@@ -1273,6 +1374,35 @@ process_volumes(HANDLE hDisk)
 	FindVolumeClose(hFind);
 }
 
+static int
+verify_label(int fd, uint_t lbsize, uint32_t original_checksum)
+{
+	int error;
+	unsigned char *data;
+	uint32_t chksum_sector_1;
+
+	data = (unsigned char *) malloc(lbsize);
+	if (!data) {
+		fprintf(stderr, "%s: unable to allocate memory\n", __func__);
+		return (VT_ERROR);
+	}
+
+	error = lseek(fd, 1 * lbsize, SEEK_SET);
+	error = read(fd, data, lbsize);
+
+	chksum_sector_1 = quick_crc32(data, lbsize);
+
+	free(data);
+
+	if (chksum_sector_1 != original_checksum) {
+		fprintf(stderr, "%s: checksum mismatch\r\n", __func__);
+		fprintf(stderr, "It appears something in Windows overwrote the OpenZFS\r\n");
+		fprintf(stderr, "partition. Manual intervention might be required.\r\n");
+		return (VT_EINVAL);
+	}
+
+	return (0);
+}
 
 /*
  * write EFI label and backup label
@@ -1334,12 +1464,21 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	if (dk_ioc.dki_data == NULL)
 		return (VT_ERROR);
 
-
 	// Tell Windows to bugger off, we are about to wipe this
 	process_volumes(fd);
 
-
 	memset(dk_ioc.dki_data, 0, dk_ioc.dki_length);
+
+	// Windows is weird, zero sectors first, as per:
+	// https://github.com/pbatard/rufus/issues/759
+	fprintf(stderr, "%s wiping start of disk\r\n", __func__);
+	dk_ioc.dki_lba = 0;
+	if (efi_ioctl(fd, DKIOCSETEFI, &dk_ioc) == -1) {
+		fprintf(stderr, "%s unable to wipe disk\r\n", __func__);
+	}
+
+	dk_ioc.dki_lba = 1;
+
 	efi = dk_ioc.dki_data;
 
 	/* stuff user's input into EFI struct */
@@ -1410,6 +1549,7 @@ efi_write(int fd, struct dk_gpt *vtoc)
 		    &vtoc->efi_parts[i].p_uguid,
 		    sizeof (uuid_t));
 	}
+
 	efi->efi_gpt_PartitionEntryArrayCRC32 =
 	    LE_32(efi_crc32((unsigned char *)efi_parts,
 	    vtoc->efi_nparts * (int)sizeof (struct efi_gpe)));
@@ -1433,6 +1573,10 @@ efi_write(int fd, struct dk_gpt *vtoc)
 		umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
 		return (0);
 	}
+
+	// Remember the chksum of sector 1
+	uint32_t chksum_sector_1 = 0;
+	chksum_sector_1 = quick_crc32(dk_ioc.dki_data, vtoc->efi_lbasize);
 
 	/* write backup partition array */
 	dk_ioc.dki_lba = vtoc->efi_last_u_lba + 1;
@@ -1479,9 +1623,9 @@ efi_write(int fd, struct dk_gpt *vtoc)
 			    errno);
 		}
 	}
+
 	/* write the PMBR */
 	(void) write_pmbr(fd, vtoc);
-	umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
 
 	// Tell Windows we have changed partitions
 	DWORD bytesReturned;
@@ -1493,7 +1637,15 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	    &bytesReturned,
 	    NULL);
 
-	return (0);
+	// Wait a bit
+	sleep(1);
+
+	// Verify it landed on disk ok
+	rval = verify_label(fd, vtoc->efi_lbasize, chksum_sector_1);
+
+	umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
+
+	return (rval);
 }
 
 void

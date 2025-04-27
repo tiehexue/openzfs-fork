@@ -4420,13 +4420,14 @@ file_basic_information_impl(PDEVICE_OBJECT DeviceObject,
     PIO_STATUS_BLOCK IoStatus)
 {
 	struct vnode *vp = FileObject->FsContext;
-	znode_t *zp = VTOZ(vp);
-	mount_t *zmo = DeviceObject->DeviceExtension;
-	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
 	int error = 0;
 	uint64_t fflags = 0;
 
-	if (zp != NULL) {
+	if (vp != NULL) {
+
+		// znode_t *zp = VTOZ(vp);
+		mount_t *zmo = DeviceObject->DeviceExtension;
+		zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
 
 		xvattr_t xva;
 		vattr_t *vap = &xva.xva_vattr;
@@ -4504,8 +4505,6 @@ file_basic_information_impl(PDEVICE_OBJECT DeviceObject,
 	fbi->CreationTime = fbi->LastAccessTime =
 	    fbi->LastWriteTime;
 	fbi->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-	if (zfsvfs->z_rdonly)
-		fbi->FileAttributes |= FILE_ATTRIBUTE_READONLY;
 	IoStatus->Information = sizeof (FILE_BASIC_INFORMATION);
 	IoStatus->Status = STATUS_SUCCESS;
 }
@@ -4522,6 +4521,7 @@ file_basic_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
+#if 0
 	if (IrpSp->FileObject == NULL ||
 	    IrpSp->FileObject->FsContext == NULL ||
 	    IrpSp->FileObject->FsContext2 == NULL) {
@@ -4529,7 +4529,7 @@ file_basic_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
 		return (Irp->IoStatus.Status);
 	}
-
+#endif
 	// This function relies on VN_HOLD in dispatcher.
 	file_basic_information_impl(DeviceObject, IrpSp->FileObject,
 	    basic, &Irp->IoStatus);

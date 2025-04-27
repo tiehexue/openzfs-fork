@@ -964,6 +964,7 @@ wosix_open(const char *inpath, int oflag, ...)
 	DWORD mode = GENERIC_READ; // RDONLY=0, WRONLY=1, RDWR=2;
 	DWORD how = OPEN_EXISTING;
 	DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+	DWORD dwFlagsAndAttributes = 0;
 	char otherpath[MAXPATHLEN];
 	char *path;
 	char *copy_path, *r;
@@ -1006,6 +1007,14 @@ wosix_open(const char *inpath, int oflag, ...)
 	if (!(oflag&O_EXLOCK)) share |= FILE_SHARE_WRITE;
 #endif
 
+	dwFlagsAndAttributes = oflag & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS :
+	    FILE_ATTRIBUTE_NORMAL;
+
+	if (oflag & O_DIRECT) {
+		dwFlagsAndAttributes |=
+		    FILE_FLAG_WRITE_THROUGH|FILE_FLAG_NO_BUFFERING;
+	}
+
 	// URLs have to start with "/" as in, "/C:"
 	if (path[0] == '\\' && path[2] == ':')
 		path++;
@@ -1034,8 +1043,7 @@ wosix_open(const char *inpath, int oflag, ...)
 	// just in case someone names their file with a starting '#'.
 
 	h = CreateFile(path, mode, share, NULL, how,
-	    oflag & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS :
-	    FILE_ATTRIBUTE_NORMAL,
+	    dwFlagsAndAttributes,
 	    NULL);
 
 	// Could be a directory (but we come from stat so no O_DIRECTORY)
@@ -1054,8 +1062,7 @@ wosix_open(const char *inpath, int oflag, ...)
 		while (end && *end == '#') end++;
 
 		h = CreateFile(end, mode, share, NULL, how,
-		    oflag & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS :
-		    FILE_ATTRIBUTE_NORMAL,
+		    dwFlagsAndAttributes,
 		    NULL);
 		if (h != INVALID_HANDLE_VALUE) {
 			// Upper layer probably handles this, but let's help
@@ -1215,8 +1222,10 @@ wosix_write(int fd, const void *data, uint32_t len)
 		if (!WriteFile(ITOH(fd), data, len, &wrote, &ow))
 			return (-1);
 	} else {
-		if (!WriteFile(ITOH(fd), data, len, &wrote, NULL))
+		if (!WriteFile(ITOH(fd), data, len, &wrote, NULL)) {
+			errno = GetLastError();
 			return (-1);
+		}
 	}
 	return (wrote);
 }
@@ -1453,48 +1462,6 @@ wosix_fstat_blk(int fd, struct _stat64 *st)
 	return (-1); // errno?
 }
 
-/*
- * There are issues with USB flash memory, attempting large reads will
- * cause disconnect and other errors, but there does not appear to be
- * a way to find that out in advance. There is surely a better way?
- */
-int
-get_maximum_transfer_length(int fd, int len)
-{
-	STORAGE_PROPERTY_QUERY query2 = {
-	    .PropertyId = StorageDeviceProperty,
-	    .QueryType = PropertyStandardQuery
-	};
-
-	BYTE buffer[1024];
-	DWORD bytesReturned;
-
-	BOOL ook = DeviceIoControl(fd,
-	    IOCTL_STORAGE_QUERY_PROPERTY,
-	    &query2, sizeof (query2),
-	    &buffer, sizeof (buffer),
-	    &bytesReturned,
-	    NULL);
-
-	if (ook) {
-		STORAGE_DEVICE_DESCRIPTOR *desc =
-		    (STORAGE_DEVICE_DESCRIPTOR *)buffer;
-		if (desc->BusType == BusTypeUsb) {
-			static int last_fd;
-			if (last_fd != fd) {
-				last_fd = fd;
-				printf("Device is USB. Restrict I/O size.\n");
-			}
-			return (512);
-		}
-	} else {
-		printf("Failed to query device: %lu\n", GetLastError());
-	}
-
-	return (len);
-}
-
-
 // os specific files can call this directly.
 int
 pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset)
@@ -1516,31 +1483,15 @@ pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset)
 
 	boolean_t ok;
 
-	int chunksize;
-	chunksize = get_maximum_transfer_length(h, nbyte);
+	ok = ReadFile(h, buf, nbyte, &red, NULL);
 
-	// We need to chunk reads for USB devices
-	while (nbyte > 0) {
-
-		int toread = MIN(nbyte, chunksize);
-
-		ok = ReadFile(h, buf, toread, &red, NULL);
-
-		if (!ok || red == 0) {
-			red = GetLastError();
-			total_red = -red;
-			break;
-		}
-		buf += red;
-		nbyte -= red;
-		total_red += red;
-//		fprintf(stderr, "ReadFile %d\n", red); fflush(stderr);
-	}
+	if (!ok || red == 0)
+		red = -GetLastError();
 
 	// Restore position
 	SetFilePointerEx(h, lnew, NULL, FILE_BEGIN);
 
-	return (total_red);
+	return (red);
 }
 
 int

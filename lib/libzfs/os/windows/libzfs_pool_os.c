@@ -207,6 +207,31 @@ zpool_label_name(char *label_name, int label_size)
 	snprintf(label_name, label_size, "zfs-%016llx", (u_longlong_t)id);
 }
 
+void dump_label(int fd)
+{
+    struct dk_gpt *vtoc;
+    int err;
+    if (efi_alloc_and_read(fd, &vtoc) != 0) {
+	fprintf(stderr, "Failed to read label\n");
+	return;
+    }
+    fprintf(stderr,
+	"EFI read OK, max partitions %d\n",
+	vtoc->efi_nparts);
+    fflush(stderr);
+    for (int i = 0; i < vtoc->efi_nparts; i++) {
+	fprintf(stderr,
+	    "    part %d:  offset %llx:    len %llx:    "
+	    "tag: %x    name: '%s'\n",
+	    i, vtoc->efi_parts[i].p_start,
+	    vtoc->efi_parts[i].p_size,
+	    vtoc->efi_parts[i].p_tag,
+	    vtoc->efi_parts[i].p_name);
+	fflush(stderr);
+    }
+	efi_free(vtoc);
+}
+
 /*
  * Label an individual disk.  The name provided is the short name,
  * stripped of any leading /dev path.
@@ -300,6 +325,8 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 
 	if (rval == 0)
 		rval = efi_rescan(fd);
+
+	dump_label(fd);
 
 	/*
 	 * Some block drivers (like pcata) may not support EFI GPT labels.
