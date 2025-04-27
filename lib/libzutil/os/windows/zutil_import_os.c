@@ -148,8 +148,6 @@ zpool_read_label_win(HANDLE h, off_t offset, uint64_t len,
 	*config = NULL;
 
 	drivesize = len;
-	if (offset > len)
-		return (-1);
 
 	size = P2ALIGN_TYPED(drivesize, sizeof (vdev_label_t), uint64_t);
 
