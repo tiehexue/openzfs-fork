@@ -68,6 +68,18 @@ ZFS_MODULE_RAW(zfs, disable_removablemedia, zfs_disable_removablemedia,
 extern kmem_cache_t *znode_cache;
 
 /*
+ * Give permissions to the volume, in particular
+ * DELETE so regular users can delete items on the volume,
+ * or regular users will get ACCESS_DENIED when trying to delete.
+ */
+static const UNICODE_STRING sddlVolume = RTL_CONSTANT_STRING(
+    L"D:P"		// DACL, protected
+    L"(A;;FA;;;SY)"	// System = Full
+    L"(A;;FA;;;BA)"	// Admins = Full
+    L"(A;;GA;;;AU)"	// Authenticated Users = GenericAll
+);
+
+/*
  * Jump through the hoops needed to make a mount happen.
  *
  * Create a new Volume name
@@ -1229,9 +1241,14 @@ zfs_windows_mount(zfs_cmd_t *zc)
 		// We can use FILE_DEVICE_DISK and get popups like
 		// "Decide what to do with removable device E:"
 		// or FILE_DEVICE_VIRTUAL_DISK to skip popup.
-		status = IoCreateDevice(WIN_DriverObject, sizeof (mount_t),
-		    &diskDeviceName, FILE_DEVICE_DISK,
-		    deviceCharacteristics | FILE_DEVICE_SECURE_OPEN, FALSE,
+		status = IoCreateDeviceSecure(WIN_DriverObject,
+		    sizeof (mount_t),
+		    &diskDeviceName,
+		    FILE_DEVICE_DISK,
+		    deviceCharacteristics | FILE_DEVICE_SECURE_OPEN,
+		    FALSE,
+		    &sddlVolume,
+		    NULL,
 		    &diskDeviceObject);
 
 		if (status != STATUS_SUCCESS) {
@@ -1639,12 +1656,14 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 		deviceCharacteristics |= FILE_READ_ONLY_DEVICE;
 
 	/* This creates the VDO - VolumeDeviceObject */
-	status = IoCreateDevice(WIN_DriverObject,
+	status = IoCreateDeviceSecure(WIN_DriverObject,
 	    sizeof (mount_t),
 	    &dcb->fs_name,
 	    FILE_DEVICE_DISK_FILE_SYSTEM,
-	    deviceCharacteristics /* |FILE_DEVICE_IS_MOUNTED */,
+	    deviceCharacteristics,
 	    FALSE,
+	    &sddlVolume,
+	    NULL,
 	    &volDeviceObject);
 
 	if (!NT_SUCCESS(status)) {
