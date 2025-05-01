@@ -501,6 +501,64 @@ allocate_reparse(struct vnode *vp, char *finalname, PIRP Irp)
 }
 
 void
+zfs_security_context_pre(vattr_t *vap,
+    PIO_SECURITY_CONTEXT SecurityContext)
+{
+	if (SecurityContext &&
+	    SecurityContext->AccessState &&
+	    SecurityContext->AccessState->SecurityDescriptor) {
+		PSECURITY_DESCRIPTOR sd;
+		PSID ownerSid, groupSid;
+		BOOLEAN ownerDefaulted, groupDefaulted;
+
+		sd = SecurityContext->AccessState->SecurityDescriptor;
+
+		// Retrieve the Owner SID using the API
+		NTSTATUS status = RtlGetOwnerSecurityDescriptor(sd, &ownerSid,
+		    &ownerDefaulted);
+		if (NT_SUCCESS(status) && ownerSid) {
+			// Translate the SID to UID for ZFS
+			vap->va_uid = zfs_sid2uid(ownerSid);
+			vap->va_mask |= ATTR_UID;
+		}
+
+		// Retrieve the Group SID using the API
+		status = RtlGetGroupSecurityDescriptor(sd, &groupSid,
+		    &groupDefaulted);
+		if (NT_SUCCESS(status) && groupSid) {
+			// Translate the SID to GID for ZFS
+			vap->va_gid = zfs_sid2gid(groupSid);
+			vap->va_mask |= ATTR_GID;
+		}
+	}
+
+	if (!(vap->va_mask & ATTR_UID)) {
+		vap->va_uid = UID_NOBODY;
+		vap->va_mask |= ATTR_UID;
+	}
+	if (!(vap->va_mask & ATTR_GID)) {
+		vap->va_gid = GID_NOBODY;
+		vap->va_mask |= ATTR_GID;
+	}
+	dprintf("%s using uid, gid: (%llu, %llu)\n", __func__,
+	    vap->va_uid, vap->va_gid);
+}
+
+
+void
+zfs_security_context_post(vnode_t *vp,
+    PIO_SECURITY_CONTEXT SecurityContext)
+{
+	if (SecurityContext != NULL &&
+	    SecurityContext->AccessState &&
+	    SecurityContext->AccessState->SecurityDescriptor != NULL) {
+		merge_security(vp,
+		    SecurityContext->AccessState);
+	}
+}
+
+
+void
 check_and_set_stream_parent(char *stream_name, PFILE_OBJECT FileObject,
     uint64_t id)
 {
@@ -1442,6 +1500,10 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		vap->va_mode |= S_IFDIR;
 		vap->va_mask |= (ATTR_MODE | ATTR_TYPE);
 
+		// Set UID,GID if passed in.
+		zfs_security_context_pre(vap,
+		    IrpSp->Parameters.Create.SecurityContext);
+
 		/* If parent is CaseSensitive, sub-Dir should be too */
 		if (VTOZ(dvp)->z_pflags & ZFS_CASESENSITIVEDIR) {
 			xoptattr_t *xoap;
@@ -1473,14 +1535,9 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 				    FileObject,
 				    &vp->share_access);
 
-#define	SC IrpSp->Parameters.Create.SecurityContext
-				if (SC != NULL &&
-				    SC->AccessState &&
-				    SC->AccessState->
-				    SecurityDescriptor != NULL) {
-					merge_security(vp,
-					    SC->AccessState);
-				}
+				// Merge SecurityDescriptors if given one.
+				zfs_security_context_post(vp,
+				    IrpSp->Parameters.Create.SecurityContext);
 
 				zfs_send_notify(zfsvfs, zccb->z_name_cache,
 				    zccb->z_name_offset,
@@ -1721,6 +1778,10 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			break;
 		}
 
+		// Set UID,GID if passed in.
+		zfs_security_context_pre(vap,
+		    IrpSp->Parameters.Create.SecurityContext);
+
 		// O_EXCL only if FILE_CREATE
 		error = zfs_create(VTOZ(dvp), finalname, vap,
 		    CreateDisposition == FILE_CREATE, vap->va_mode,
@@ -1766,13 +1827,9 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 				// Did we create file, or stream?
 				if (!(zp->z_pflags & ZFS_XATTR)) {
 
-					if (SC != NULL &&
-					    SC->AccessState &&
-					    SC->AccessState->
-					    SecurityDescriptor != NULL) {
-						merge_security(vp,
-						    SC->AccessState);
-					}
+					// Merge SecurityDescriptors
+					zfs_security_context_post(vp, IrpSp->
+					    Parameters.Create.SecurityContext);
 
 					zfs_send_notify(zfsvfs,
 					    zccb->z_name_cache,
@@ -2146,6 +2203,188 @@ zfs_vnop_reclaim(struct vnode *vp)
 	return (0);
 }
 
+// Change if you want to debug SecurityDescriptors
+#if 1
+
+#define	DUMP_SD(sid)
+#undef	USE_DUMP_SD
+void dump_sd(PSECURITY_DESCRIPTOR sd) { }
+
+#else
+
+#define	DUMP_SD(sid) dump_sd(sid)
+
+void
+dump_sid(PSID sid)
+{
+	UNICODE_STRING sidString;
+	RtlConvertSidToUnicodeString(&sidString, sid, TRUE);
+	dprintf("SID: %wZ\n", &sidString);
+}
+
+void
+DumpAcl(PACL acl)
+{
+	if (acl == NULL) {
+		dprintf("NULL ACL\n");
+		return;
+	}
+
+	// Dump basic ACL info
+	dprintf("ACL Size: %u\n", acl->AclSize);
+	dprintf("ACL Revision: %u\n", acl->AclRevision);
+	dprintf("ACE Count: %u\n", acl->AceCount);
+
+	// Iterate through all the ACEs in the ACL
+	PACE_HEADER aceHeader = NULL;
+	ULONG aceOffset = sizeof (ACL);  // Starting after ACL header
+
+	for (ULONG i = 0; i < acl->AceCount; i++) {
+		// Get the ACE pointer by calculating its offset within the ACL
+		aceHeader = (PACE_HEADER)((PUCHAR)acl + aceOffset);
+
+		if (aceHeader == NULL) {
+			dprintf("Failed to get ACE #%u\n", i);
+			continue;
+		}
+
+		dprintf("  ACE #%u: ", i);
+		dprintf("ACE Type: %u ", aceHeader->AceType);
+		dprintf("ACE Size: %u ", aceHeader->AceSize);
+
+		// Print the Access Mask based on the ACE type
+		switch (aceHeader->AceType) {
+		case ACCESS_ALLOWED_ACE_TYPE:
+		case ACCESS_DENIED_ACE_TYPE:
+		{
+			PACCESS_ALLOWED_ACE ace =
+			    (PACCESS_ALLOWED_ACE)aceHeader;
+			dprintf("Access Mask: 0x%08X\n", ace->Mask);
+			dump_sid(&ace->SidStart);
+		}
+		break;
+		case SYSTEM_AUDIT_ACE_TYPE:
+		{
+			PSYSTEM_AUDIT_ACE ace =
+			    (PSYSTEM_AUDIT_ACE)aceHeader;
+			dprintf("Audit Mask: 0x%08X\n", ace->Mask);
+			dump_sid(&ace->SidStart);
+		}
+		break;
+		case ACCESS_ALLOWED_COMPOUND_ACE_TYPE:
+			dprintf("Access Allowed Compound ACE\n");
+			break;
+	//	case ACCESS_DENIED_COMPOUND_ACE_TYPE:
+	//	    dprintf("Access Denied Compound ACE\n");
+	//	    break;
+		default:
+			dprintf("Unknown ACE Type %u\n",
+			    aceHeader->AceType);
+		}
+
+		aceOffset += aceHeader->AceSize;  // Move to the next ACE
+	}
+}
+
+void
+dump_sd(PSECURITY_DESCRIPTOR sd)
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	PSECURITY_DESCRIPTOR absoluteSD = NULL;
+	BOOLEAN daclPresent = FALSE, saclPresent = FALSE,
+	    ownerDefaulted = FALSE, groupDefaulted = FALSE;
+	PACL dacl = NULL, sacl = NULL;
+	PSID owner = NULL, primaryGroup = NULL;
+
+	// If SD is in self-relative format, convert it to absolute
+	if (!RtlValidSecurityDescriptor(sd)) {
+		dprintf("Invalid security descriptor!\n");
+		return;
+	}
+
+	if (RtlValidRelativeSecurityDescriptor(sd,
+	    RtlLengthSecurityDescriptor(sd), 0)) {
+
+		ULONG sdSize = 0;
+		ULONG daclSize = 0;
+		ULONG saclSize = 0;
+		ULONG ownerSize = 0;
+		ULONG primaryGroupSize = 0;
+
+		// Get the required sizes for the absolute SD and associated
+		// fields
+		status = RtlSelfRelativeToAbsoluteSD(sd, absoluteSD, &sdSize,
+		    dacl, &daclSize, sacl, &saclSize, owner, &ownerSize,
+		    primaryGroup, &primaryGroupSize);
+		if (status == STATUS_BUFFER_TOO_SMALL) {
+			// Allocate memory for absolute SD and associated
+			// components
+			absoluteSD = ExAllocatePoolWithTag(NonPagedPool,
+			    sdSize, 'SDAB');
+			if (!absoluteSD) {
+				dprintf("Failed to allocate memory\n");
+				return;
+			}
+
+			dacl = ExAllocatePoolWithTag(NonPagedPool, daclSize,
+			    'DACL');
+			sacl = ExAllocatePoolWithTag(NonPagedPool, saclSize,
+			    'SACL');
+			owner = ExAllocatePoolWithTag(NonPagedPool, ownerSize,
+			    'OWNR');
+			primaryGroup = ExAllocatePoolWithTag(NonPagedPool,
+			    primaryGroupSize, 'PGRP');
+
+			if (!dacl || !sacl || !owner || !primaryGroup) {
+				dprintf("Failed to allocate memory\n");
+				ExFreePool(absoluteSD);
+				return;
+			}
+
+			// Now, perform the conversion
+			status = RtlSelfRelativeToAbsoluteSD(sd, absoluteSD,
+			    &sdSize, dacl, &daclSize, sacl, &saclSize, owner,
+			    &ownerSize, primaryGroup, &primaryGroupSize);
+			if (!NT_SUCCESS(status)) {
+				dprintf("failed with status: 0x%X\n", status);
+				ExFreePool(absoluteSD);
+				ExFreePool(dacl);
+				ExFreePool(sacl);
+				ExFreePool(owner);
+				ExFreePool(primaryGroup);
+				return;
+			}
+
+			// Print the absolute SD details
+			dprintf("Absolute Security Descriptor:\n");
+			dprintf("  Owner SID: ");
+			dump_sid(owner);
+			dprintf("  Primary Group SID: ");
+			dump_sid(primaryGroup);
+			if (daclSize) {
+				dprintf("  DACL: ");
+				DumpAcl(dacl);
+			}
+			if (saclSize) {
+				dprintf("  SACL: ");
+				DumpAcl(sacl);
+			}
+			// Free memory after printing
+			ExFreePool(absoluteSD);
+			ExFreePool(dacl);
+			ExFreePool(sacl);
+			ExFreePool(owner);
+			ExFreePool(primaryGroup);
+		} else {
+			dprintf("Failed to retrieve buffer size: 0x%X\n",
+			    status);
+		}
+		return;
+	}
+	dprintf("SD is Absolute\n");
+}
+#endif
+
 /*
  */
 void
@@ -2246,6 +2485,8 @@ zfs_znode_getvnode(znode_t *zp, znode_t *dzp, zfsvfs_t *zfsvfs)
 		    ZTOV(dzp) : NULL);
 		if (!NT_SUCCESS(Status))
 			dprintf("zfs_attach_security failed: 0x%lx\n", Status);
+		dprintf("After zfs_attach_security: \n");
+		dump_sd(vp->security_descriptor);
 	}
 	return (0);
 }
@@ -6139,6 +6380,7 @@ query_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		Irp->IoStatus.Information = buflen;
 	} else if (NT_SUCCESS(Status)) {
 		Irp->IoStatus.Information = buflen;
+		dump_sd(sd);
 	} else {
 		dprintf("%s: failed 0x%lx\n", __func__, Status);
 		Irp->IoStatus.Information = 0;
@@ -6225,7 +6467,7 @@ set_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	    FILE_ACTION_MODIFIED);
 
 	zfs_save_ntsecurity(vp);
-
+	dump_sd(vp->security_descriptor);
 err:
 	VN_RELE(vp);
 	return (Status);
@@ -6242,6 +6484,11 @@ merge_security(vnode_t *vp, PACCESS_STATE as)
 
 	dvp = zfs_parent(vp);
 	parent_sd = vnode_security(dvp);
+
+	dprintf("%s: parent SD\n", __func__);
+	dump_sd(parent_sd);
+	dprintf("%s: passed-in SD\n", __func__);
+	dump_sd(as->SecurityDescriptor);
 
 	Status = SeAssignSecurityEx(parent_sd, as->SecurityDescriptor,
 	    (void **) &new_sd, NULL,
@@ -6273,6 +6520,9 @@ merge_security(vnode_t *vp, PACCESS_STATE as)
 
 		if (oldsd)
 			ExFreePool(oldsd);
+		dprintf("%s: merged result SD\n", __func__);
+		dump_sd(new_sd);
+
 	}
 
 	return (Status);

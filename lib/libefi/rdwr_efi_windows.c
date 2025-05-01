@@ -147,8 +147,8 @@ gotsize:
 		if (DeviceIoControl(
 		    ITOH(fd),
 		    IOCTL_STORAGE_QUERY_PROPERTY,
-		    &query, sizeof(query),
-		    &align, sizeof(align),
+		    &query, sizeof (query),
+		    &align, sizeof (align),
 		    &len,
 		    NULL)) {
 			*lbsize = align.BytesPerLogicalSector;
@@ -510,7 +510,7 @@ quick_crc32(const void *data, size_t len)
 		}
 	}
 
-	return ~crc;
+	return (~crc);
 }
 
 static int
@@ -547,8 +547,10 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 		}
 
 		if (efi_debug)
-			fprintf(stderr, "DKIOCGETEFI: lba %llu, sectorsize %d, length %lld\n",
-			    (long long)dk_ioc->dki_lba, lbsize, dk_ioc->dki_length);
+			fprintf(stderr,
+			    "DKIOCGETEFI: lba %llu, sectorsize %d, len %lld\n",
+			    (long long)dk_ioc->dki_lba, lbsize,
+			    dk_ioc->dki_length);
 
 		int block = dk_ioc->dki_lba;
 		size_t total_iosize = dk_ioc->dki_length;
@@ -560,16 +562,18 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 			error = lseek(fd, block * lbsize, SEEK_SET);
 			if (error == -1) {
 				if (efi_debug)
-					(void) fprintf(stderr, "DKIOCGETEFI lseek "
-					    "error: %d\n", errno);
+					(void) fprintf(stderr,
+					    "DKIOCGETEFI lseek error: %d\n",
+					    errno);
 				return (error);
 			}
 
 			error = read(fd, data, iosize);
 			if (error == -1) {
 				if (efi_debug)
-					(void) fprintf(stderr, "DKIOCGETEFI read "
-					    "error: %d\n", errno);
+					(void) fprintf(stderr,
+					    "DKIOCGETEFI read error: %d\n",
+					    errno);
 				return (error);
 			}
 
@@ -601,8 +605,10 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 		}
 
 		if (efi_debug)
-			fprintf(stderr, "DKIOCSETEFI: lba %llu, sectorsize %d, length %lld\n",
-			    (long long)dk_ioc->dki_lba, lbsize, dk_ioc->dki_length);
+			fprintf(stderr,
+			    "DKIOCSETEFI: lba %llu, sectorsize %d, len%lld\n",
+			    (long long)dk_ioc->dki_lba, lbsize,
+			    dk_ioc->dki_length);
 
 		int block = dk_ioc->dki_lba;
 		size_t total_iosize = dk_ioc->dki_length;
@@ -614,16 +620,18 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 			error = lseek(fd, block * lbsize, SEEK_SET);
 			if (error == -1) {
 				if (efi_debug)
-					(void) fprintf(stderr, "DKIOCSETEFI lseek "
-					    "error: %d\n", errno);
+					(void) fprintf(stderr,
+					    "DKIOCSETEFI lseek error: %d\n",
+					    errno);
 				return (error);
 			}
 
 			error = write(fd, data, iosize);
 			if (error == -1) {
 				if (efi_debug)
-					(void) fprintf(stderr, "DKIOCSETEFI write "
-					    "error: %d\n", errno);
+					(void) fprintf(stderr,
+					    "DKIOCSETEFI write error: %d\n",
+					    errno);
 				return (error);
 			}
 
@@ -1280,100 +1288,6 @@ efi_use_whole_disk(int fd)
 	return (0);
 }
 
-void
-process_volumes(HANDLE hDisk)
-{
-	// Step 1: Get physical disk number
-	STORAGE_DEVICE_NUMBER devNum;
-	DWORD bytesReturned;
-	if (!DeviceIoControl(hDisk,
-	    IOCTL_STORAGE_GET_DEVICE_NUMBER,
-	    NULL, 0,
-	    &devNum, sizeof (devNum),
-	    &bytesReturned, NULL)) {
-		printf("Failed to get device number: %lu\n",
-		    GetLastError());
-		return;
-	}
-
-	DWORD targetDiskNumber = devNum.DeviceNumber;
-
-	// Step 2: Enumerate all volumes
-	WCHAR volumeName[MAX_PATH];
-	HANDLE hFind = FindFirstVolumeW(volumeName,
-	    ARRAYSIZE(volumeName));
-	if (hFind == INVALID_HANDLE_VALUE) {
-		fprintf(stderr, "FindFirstVolumeW failed: %lu\n",
-		    GetLastError());
-		return;
-	}
-
-	do {
-		// Remove trailing backslash for CreateFileW
-		size_t len = wcslen(volumeName);
-		if (volumeName[len - 1] == L'\\') {
-			volumeName[len - 1] = L'\0';
-		}
-
-		HANDLE hVol = CreateFileW(volumeName,
-		    GENERIC_READ | GENERIC_WRITE,
-		    FILE_SHARE_READ | FILE_SHARE_WRITE,
-		    NULL, OPEN_EXISTING, 0, NULL);
-
-		if (hVol == INVALID_HANDLE_VALUE)
-			continue;
-
-		// Step 3: Check disk extents
-		VOLUME_DISK_EXTENTS extents;
-		if (!DeviceIoControl(hVol,
-		    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-		    NULL, 0,
-		    &extents, sizeof (extents),
-		    &bytesReturned, NULL)) {
-			CloseHandle(hVol);
-			continue;
-		}
-
-		for (DWORD i = 0;
-		    i < extents.NumberOfDiskExtents;
-		    ++i) {
-			if (extents.Extents[i].DiskNumber ==
-			    targetDiskNumber) {
-				fwprintf(stderr,
-				    L"Volume %s is on PHYSICALDRIVE%lu\n",
-				    volumeName, targetDiskNumber);
-
-				// Try to lock and dismount
-				if (DeviceIoControl(hVol, FSCTL_LOCK_VOLUME,
-				    NULL, 0, NULL, 0, &bytesReturned, NULL)) {
-					fprintf(stderr, "  Locked.\n");
-					if (DeviceIoControl(hVol,
-					    FSCTL_DISMOUNT_VOLUME, NULL, 0,
-					    NULL, 0, &bytesReturned, NULL)) {
-						fprintf(stderr,
-						    "  Dismounted.\n");
-					} else {
-						fprintf(stderr,
-						    "  Dismount: %lu\n",
-						    GetLastError());
-					}
-				} else {
-					fprintf(stderr,
-					    "  Failed to lock: %lu\n",
-					    GetLastError());
-				}
-			}
-		}
-
-		CloseHandle(hVol);
-
-		// Restore trailing slash
-		volumeName[len - 1] = L'\\';
-	} while (FindNextVolumeW(hFind, volumeName, ARRAYSIZE(volumeName)));
-
-	FindVolumeClose(hFind);
-}
-
 static int
 verify_label(int fd, uint_t lbsize, uint32_t original_checksum)
 {
@@ -1396,8 +1310,9 @@ verify_label(int fd, uint_t lbsize, uint32_t original_checksum)
 
 	if (chksum_sector_1 != original_checksum) {
 		fprintf(stderr, "%s: checksum mismatch\r\n", __func__);
-		fprintf(stderr, "It appears something in Windows overwrote the OpenZFS\r\n");
-		fprintf(stderr, "partition. Manual intervention might be required.\r\n");
+		fprintf(stderr,
+"It appears something in Windows overwrote the OpenZFS partition.\r\n"
+"Manual intervention might be required.\r\n");
 		return (VT_EINVAL);
 	}
 
@@ -1464,9 +1379,6 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	if (dk_ioc.dki_data == NULL)
 		return (VT_ERROR);
 
-	// Tell Windows to bugger off, we are about to wipe this
-	process_volumes(fd);
-
 	memset(dk_ioc.dki_data, 0, dk_ioc.dki_length);
 
 	// Windows is weird, zero sectors first, as per:
@@ -1476,6 +1388,17 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	if (efi_ioctl(fd, DKIOCSETEFI, &dk_ioc) == -1) {
 		fprintf(stderr, "%s unable to wipe disk\r\n", __func__);
 	}
+	DWORD bytesReturned;
+	DeviceIoControl(
+	    fd,
+	    IOCTL_DISK_UPDATE_PROPERTIES,
+	    NULL, 0,
+	    NULL, 0,
+	    &bytesReturned,
+	    NULL);
+
+	// Wait a bit
+	sleep(1);
 
 	dk_ioc.dki_lba = 1;
 
@@ -1628,7 +1551,6 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	(void) write_pmbr(fd, vtoc);
 
 	// Tell Windows we have changed partitions
-	DWORD bytesReturned;
 	DeviceIoControl(
 	    fd,
 	    IOCTL_DISK_UPDATE_PROPERTIES,

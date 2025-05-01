@@ -160,7 +160,6 @@ typedef union {
 #define	STDIN_FILENO  HTOI(GetStdHandle(STD_INPUT_HANDLE))
 #define	STDOUT_FILENO HTOI(GetStdHandle(STD_OUTPUT_HANDLE))
 #define	STDERR_FILENO HTOI(GetStdHandle(STD_ERROR_HANDLE))
-#define	O_EXLOCK 0
 
 #define	alloca _alloca
 int posix_memalign(void **memptr, size_t alignment, size_t size);

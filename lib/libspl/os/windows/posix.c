@@ -1004,11 +1004,11 @@ wosix_open(const char *inpath, int oflag, ...)
 	if (oflag&O_APPEND) mode |= FILE_APPEND_DATA;
 
 #ifdef O_EXLOCK
-	if (!(oflag&O_EXLOCK)) share |= FILE_SHARE_WRITE;
+	if (oflag&O_EXLOCK) share &= ~FILE_SHARE_WRITE;
 #endif
 
-	dwFlagsAndAttributes = oflag & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS :
-	    FILE_ATTRIBUTE_NORMAL;
+	dwFlagsAndAttributes = oflag & O_DIRECTORY ?
+	    FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
 
 	if (oflag & O_DIRECT) {
 		dwFlagsAndAttributes |=

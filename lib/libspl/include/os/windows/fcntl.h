@@ -28,6 +28,7 @@
 #define	O_LARGEFILE	0
 #define	O_RSYNC		0
 #define	O_DIRECT	0x100000 // Let's hope it is spare.
+#define	O_EXLOCK	0x200000 // ditto
 #define	O_SYNC		0
 #define	O_DSYNC		0
 #define	O_CLOEXEC	0
