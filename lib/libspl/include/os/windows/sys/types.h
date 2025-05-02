@@ -33,11 +33,17 @@
 #ifndef _LIBSPL_SYS_W32_TYPES_H
 #define	_LIBSPL_SYS_W32_TYPES_H
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 #include <sys/types32.h>
 
 /* More #includes at end - after basic types */
 
+#ifndef  __cplusplus
 typedef enum boolean bool_t;
+#endif
 
 typedef unsigned char	uchar_t;
 typedef unsigned short	ushort_t;
@@ -216,6 +222,10 @@ typedef uint64_t zoff_t;
 /* Now replace POSIX calls with our versions. */
 #ifndef NOWOSIXYET
 #include <wosix.h>
+#endif
+
+#ifdef  __cplusplus
+}
 #endif
 
 #endif

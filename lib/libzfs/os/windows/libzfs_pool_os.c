@@ -53,6 +53,9 @@
 #include "zfs_comutil.h"
 #include "zfeature_common.h"
 
+HRESULT OfflineDisk(const char *devicePath);
+HRESULT OnlineDisk(const char *devicePath);
+
 /*
  * If the device has being dynamically expanded then we need to relabel
  * the disk to use the new unallocated space.
@@ -342,6 +345,9 @@ efi_tryexclusive(int fd, const char *path)
 	close(fd);
 	fd = -1;
 
+	fprintf(stderr, "%s: trying to offline disk\r\n", __func__);
+	OfflineDisk(path);
+
 	fprintf(stderr, "%s: trying for exclusive access\r\n", __func__);
 
 	do {
@@ -421,6 +427,9 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
 		    "label '%s': unable to read disk capacity"), path);
 
+		fprintf(stderr, "%s: trying to online disk\r\n", __func__);
+		OnlineDisk(path);
+
 		return (zfs_error(hdl, EZFS_NOCAP, errbuf));
 	}
 
@@ -459,6 +468,13 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		rval = efi_rescan(fd);
 
 	dump_label(fd);
+
+	fprintf(stderr, "%s: trying to online disk\r\n", __func__);
+	rval = OnlineDisk(path);
+	if (SUCCEEDED(rval))
+		fprintf(stderr, "%s: failed %d (0x%x)\r\n", __func__,
+		    rval, rval);
+	rval = 0;
 
 	/*
 	 * Some block drivers (like pcata) may not support EFI GPT labels.

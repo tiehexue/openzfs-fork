@@ -56,6 +56,10 @@ extern char	*optarg;
 
 #define	X_OK	1
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 extern uint64_t sysconf(int name);
 
 extern size_t strlcpy(char *s, const char *t, size_t n);
@@ -107,5 +111,9 @@ static inline pid_t fork(void)
 
 extern int mkostemps(char *templ, int suffixlen, DWORD flags);
 void *reallocarray(void *optr, size_t nmemb, size_t size);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* _LIBSPL_WINDOWS_UNISTD_H */
