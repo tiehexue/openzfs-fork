@@ -232,6 +232,7 @@ dump_label(int fd)
 		    vtoc->efi_parts[i].p_tag,
 		    vtoc->efi_parts[i].p_name);
 		fflush(stderr);
+		if (i > 11) break;
 	}
 	efi_free(vtoc);
 }
@@ -412,6 +413,11 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		return (zfs_error(hdl, EZFS_OPENFAILED, errbuf));
 	}
 
+	// In Windows we MUST use 128 partitions, or Windows thinks the CRC
+	// is invalid, and goes to correct it.
+#undef EFI_NUMPAR
+#define	EFI_NUMPAR	128
+
 	// This might re-open fd exclusively if it can
 	fd = efi_tryexclusive(fd, path);
 
@@ -453,7 +459,16 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 	 */
 	vtoc->efi_parts[0].p_tag = V_USR;
 	zpool_label_name(vtoc->efi_parts[0].p_name, EFI_PART_NAME_LEN);
+#if 0
+	for (int i = 1; i < 8; i++) {
+		vtoc->efi_parts[i].p_tag = V_RESERVED;
+		vtoc->efi_parts[i].p_start = slice_size + start_block;
 
+//		vtoc->efi_parts[i].p_size = 1;
+//		resv -= 1;
+//		start_block += 1;
+	}
+#endif
 	vtoc->efi_parts[8].p_start = slice_size + start_block;
 	vtoc->efi_parts[8].p_size = resv;
 	vtoc->efi_parts[8].p_tag = V_RESERVED;
