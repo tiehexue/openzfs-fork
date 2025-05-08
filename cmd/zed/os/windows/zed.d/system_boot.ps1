@@ -6,8 +6,8 @@
 # This can be a useful aid when developing/debugging ZEDLETs since it shows the
 # environment variables defined for each zevent.
 
-if (Test-Path "$env:ZED_ZEDLET_DIR\zed.rc") {
-    . "$env:ZED_ZEDLET_DIR\zed.rc"
+if (Test-Path "$env:ZED_ZEDLET_DIR\zed.rc.ps1") {
+    . "$env:ZED_ZEDLET_DIR\zed.rc.ps1"
 }
 if (Test-Path "$env:ZED_ZEDLET_DIR\zed-functions.ps1") {
     . "$env:ZED_ZEDLET_DIR\zed-functions.ps1"
