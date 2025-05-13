@@ -362,8 +362,7 @@ vdev_queue_max_async_writes(spa_t *spa)
 		return (zfs_vdev_async_write_min_active);
 
 #ifdef _WIN32
-	if ((max_bytes - min_bytes) +
-	    zfs_vdev_async_write_min_active == 0)
+	if ((max_bytes - min_bytes) == 0)
 		return (zfs_vdev_async_write_min_active);
 #endif
 
@@ -376,8 +375,8 @@ vdev_queue_max_async_writes(spa_t *spa)
 	writes = (dirty - min_bytes) *
 	    (zfs_vdev_async_write_max_active -
 	    zfs_vdev_async_write_min_active) /
-	    ((max_bytes - min_bytes) +
-	    zfs_vdev_async_write_min_active);
+	    (max_bytes - min_bytes) +
+	    zfs_vdev_async_write_min_active;
 	ASSERT3U(writes, >=, zfs_vdev_async_write_min_active);
 	ASSERT3U(writes, <=, zfs_vdev_async_write_max_active);
 	return (writes);
