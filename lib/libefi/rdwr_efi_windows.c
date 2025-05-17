@@ -453,7 +453,7 @@ efi_alloc_and_init(int fd, uint32_t nparts, struct dk_gpt **vtoc)
  * Read EFI - return partition number upon success.
  */
 int
-efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
+efi_alloc_and_read_flags(int fd, struct dk_gpt **vtoc, uint_t flags)
 {
 	int			rval;
 	uint32_t		nparts;
@@ -467,6 +467,7 @@ efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
 		return (VT_ERROR);
 
 	(*vtoc)->efi_nparts = nparts;
+	(*vtoc)->efi_flags = flags;
 	rval = efi_read(fd, *vtoc);
 
 	if ((rval == VT_EINVAL) && (*vtoc)->efi_nparts > nparts) {
@@ -495,6 +496,12 @@ efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
 	}
 
 	return (rval);
+}
+
+int
+efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
+{
+	return (efi_alloc_and_read_flags(fd, vtoc, 0));
 }
 
 static uint32_t
@@ -844,7 +851,8 @@ efi_read(int fd, struct dk_gpt *vtoc)
 				return (VT_ERROR);
 			}
 		}
-	} else if ((rval = check_label(fd, &dk_ioc)) == VT_EINVAL) {
+	} else if ((rval = check_label(fd, &dk_ioc)) == VT_EINVAL ||
+	    (vtoc->efi_flags & EFI_GPT_PRIMARY_SKIP)) {
 		/*
 		 * No valid label here; try the alternate. Note that here
 		 * we just read GPT header and save it into dk_ioc.data,

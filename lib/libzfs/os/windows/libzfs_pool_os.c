@@ -413,11 +413,6 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		return (zfs_error(hdl, EZFS_OPENFAILED, errbuf));
 	}
 
-	// In Windows we MUST use 128 partitions, or Windows thinks the CRC
-	// is invalid, and goes to correct it.
-#undef EFI_NUMPAR
-#define	EFI_NUMPAR	128
-
 	// This might re-open fd exclusively if it can
 	fd = efi_tryexclusive(fd, path);
 
