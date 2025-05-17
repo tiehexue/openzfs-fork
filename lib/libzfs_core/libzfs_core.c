@@ -107,6 +107,7 @@
  */
 #define	BIG_PIPE_SIZE (64 * 1024)
 #endif
+#include "libzfs_core_impl.h"
 
 static int g_fd = -1;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -181,6 +182,12 @@ libzfs_core_fini(void)
 		g_fd = -1;
 	}
 	(void) pthread_mutex_unlock(&g_lock);
+}
+
+int
+lzc_ioctl_fd(int fd, unsigned long ioc, zfs_cmd_t *zc)
+{
+	return (lzc_ioctl_fd_os(fd, ioc, zc));
 }
 
 static int
