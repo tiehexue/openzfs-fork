@@ -86,7 +86,8 @@ ServiceBinary    = %12%\%DriverName%.sys    ;%windir%\system32\drivers\
 ServiceType      = 1
 StartType        = 1                        ;SERVICE_SYSTEM_START
 ErrorControl     = 1
-LoadOrderGroup   = "System"
+LoadOrderGroup   = System Bus Extender
+DependOnService  = storport
 
 ;;[shellOpenZVOL]
 ;;11,,shellOpenZVOL.dll,1
