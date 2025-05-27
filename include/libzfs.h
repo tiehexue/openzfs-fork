@@ -594,6 +594,7 @@ _LIBZFS_H int zfs_crypto_load_key_direct(zfs_handle_t *zhp, boolean_t,
 
 _LIBZFS_H int zfs_crypto_unload_key(zfs_handle_t *);
 _LIBZFS_H int zfs_crypto_rewrap(zfs_handle_t *, nvlist_t *, boolean_t);
+_LIBZFS_H boolean_t zfs_is_encrypted(zfs_handle_t *);
 
 typedef struct zprop_list {
 	int		pl_prop;
