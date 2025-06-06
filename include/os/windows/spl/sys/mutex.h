@@ -58,9 +58,10 @@ typedef enum {
 	MUTEX_DEFAULT = 6	/* kernel default mutex */
 } kmutex_type_t;
 
+/* arm64 NEEDs this aligned */
 typedef struct {
-	KEVENT opaque;
-} mutex_t;
+	__declspec(align(8)) KEVENT opaque;
+} mutex_t; // __attribute__((aligned(8)));
 
 /*
  * Solaris kmutex defined.
