@@ -93,7 +93,7 @@
 #include <sys/types.h>
 #include <sys/mod_os.h>
 #include <ntddk.h>
-#include <ntddstor.h>
+// #include <ntddstor.h>
 #include <storport.h>
 #include <fltKernel.h>
 
@@ -356,8 +356,12 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 	IoDeleteSymbolicLink(&symbolicLinkName);
 	IoDeleteSymbolicLink(&symbolicLinkName2);
 
-	IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
-	IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
+	if (StopUnload_DriverObject)
+		IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
+	StopUnload_DriverObject = NULL;
+	if (OpenZVOL_DriverObject)
+		IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
+	OpenZVOL_DriverObject = NULL;
 }
 
 NTSTATUS
