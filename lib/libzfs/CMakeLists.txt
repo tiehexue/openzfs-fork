@@ -25,7 +25,8 @@ add_library(libzfs
 # '/c/Program Files/OpenSSL-Win64/lib/VC/x64/MTd/libssl_static.lib'
 set(CMAKE_FIND_DEBUG_MODE TRUE)
 
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
 	find_library(CRYPTO_STATIC_TEST
 		NAMES
 		  libcrypto_static
@@ -36,7 +37,7 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
 		  lib
 		REQUIRED
 	  )
-elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
 	find_library(CRYPTO_STATIC_TEST
 		NAMES
 		  libcrypto_static

@@ -10,7 +10,7 @@ find_package(WDK REQUIRED)
 
 option(BUILD_SHARED_LIBS "Build Shared Libraries" OFF)
 
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
 	set(OPENSSL_CRYPTO_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MTd/libcrypto_static.lib")
 	set(OPENSSL_SSL_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MTd/libssl_static.lib")
 elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
@@ -44,14 +44,15 @@ add_compile_options(/FI ${CMAKE_SOURCE_DIR}/include/os/windows/zfs/zfs_config.h)
 set(CMAKE_C_COMPILER clang-cl.exe PARENT_SCOPE)
 set(CMAKE_CXX_COMPILER clang-cl.exe PARENT_SCOPE)
 
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-	if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
 		add_compile_options(-m32)
-	else()
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+		add_definitions(-D_LP64 -D__LP64__)
 		add_compile_options(-m64)
-	endif()
-elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64") # all except wdk_add_library
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64") # all except wdk_add_library
 		add_compile_options(-target aarch64-pc-windows-msvc)
+else()
+	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 add_compile_options(
@@ -77,30 +78,32 @@ add_compile_options(
 )
 endfunction()
 
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-	if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-	    add_definitions(-D__x86_32__ -D__i386 -D__i386__ -D_LP32 -DWIN32)
-	elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
-	    add_definitions(-D__x86_64__ -D_LP64 -D__LP64__ -D__x86_64 -D_AMD64_ -D_WIN64 -DAMD64 -DWIN64)
-	endif()
-elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
-	add_definitions(-DARM64 -D_ARM64_ -D__aarch64__ -D_LP64 -D__LP64__ -D_WIN64 -DWIN64)
-	# Fix up wdk_add_library
-	set(WDK_COMPILE_FLAGS "--target=arm64-windows-msvc" CACHE STRING "" FORCE)
-	#set(WDK_C_FLAGS   "/target:aarch64-pc-windows-msvc" CACHE STRING "" FORCE)
-	#set(WDK_CXX_FLAGS "/target:aarch64-pc-windows-msvc" CACHE STRING "" FORCE)
+string(CONCAT WDK_LINK_FLAGS
+	"/DEBUG "
+)
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
+		list(APPEND WDK_COMPILE_DEFINITIONS	-D_KERNEL -D__KERNEL__ -D_LP32 -D__LP32__)
+		list(APPEND WDK_COMPILE_FLAGS
+			/Z7
+			-m32
+		)
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+		list(APPEND WDK_COMPILE_DEFINITIONS	-D_KERNEL -D__KERNEL__ -D_LP64 -D__LP64__)
+		list(APPEND WDK_COMPILE_FLAGS
+			/Z7
+			-m64
+		)
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64") # all except wdk_add_library
+		list(APPEND WDK_COMPILE_DEFINITIONS	-D_KERNEL -D__KERNEL__ -DARM64 -D_ARM64_ -D__aarch64__ -D_M_ARM64 -D_LP64 -D__LP64__)
+		list(APPEND WDK_COMPILE_FLAGS
+			/Z7
+			--target=arm64-windows-msvc
+		)
+else()
+	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
-# Add .pdb debug symbols - always.
-# /Z7 is embedded, /Zi is .pdb.
-add_compile_options(/Zi)
-add_link_options(/DEBUG)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "x64-Debug")
-    add_definitions(-DDBG -DZFS_DEBUG)
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL "arm64-Debug")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DDBG -DZFS_DEBUG)
 endif()
 

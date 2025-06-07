@@ -34,12 +34,15 @@ OpenZFS.DllFiles          = 11            ;%windir%\system32
 ;AddService  = %ServiceName%,0x802,OpenZFS.Service
 
 [Manufacturer]
-%Me%=Standard,NTamd64,NTx86
+%Me%=Standard,NTamd64,NTx86,NTarm64
 
 [Standard.NTamd64]
 ;%VolumeName% = OpenZFS_Install, OpenZFSVolume
 %DriverName% = OpenZFS_Install, ROOT\OpenZFS
 ;%ControllerName% = OpenZFS_Install, ROOT\OpenZFS
+
+[Standard.NTarm64]
+%DriverName% = OpenZFS_Install, ROOT\OpenZFS
 
 [Standard.NTx86]
 ;%VolumeName% = OpenZFS_Install, OpenZFSVolume
@@ -118,6 +121,9 @@ OpenZFS.man = 1,,
 [SourceDisksNames.amd64]
 1 = %DiskId1%,,
 ;;,\x64
+
+[SourceDisksNames.arm64]
+1 = %DiskId1%,,
 
 ;;
 ;; String Section

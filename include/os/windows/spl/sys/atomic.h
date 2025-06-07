@@ -32,8 +32,7 @@
 #define	_SPL_ATOMIC_H
 
 #include <sys/types.h>
-
-#include <wdm.h>
+#include <ntifs.h>
 
 #ifdef __aarch64__
 #include <arm64intr.h>
@@ -43,6 +42,18 @@
 extern "C" {
 #endif
 
+#if 0
+__int64 _InterlockedIncrement64(_Interlocked_operand_ __int64 volatile *_Addend);
+__int64 _InterlockedDecrement64(_Interlocked_operand_ __int64 volatile *_Addend);
+__int64 _InterlockedCompareExchange64(_Interlocked_operand_ __int64 volatile *_Destination, __int64 _Exchange, __int64 _Comparand);
+__int64 _InterlockedExchange64(_Interlocked_operand_ __int64 volatile *_Target, __int64 _Value);
+__int64 _InterlockedExchangeAdd64(_Interlocked_operand_ __int64 volatile *_Addend, __int64 _Value);
+void _mm_mfence(void);
+void _mm_sfence(void);
+void _mm_lfence(void);
+#endif
+
+#if 0
 // ARM64 does not always define these
 #ifndef InterlockedIncrement
 #define	InterlockedIncrement _InterlockedIncrement
@@ -77,7 +88,7 @@ extern "C" {
 #ifndef InterlockedCompareExchangePointer
 #define	InterlockedCompareExchangePointer _InterlockedCompareExchangePointer
 #endif
-
+#endif
 
 /* The _nv variants return the NewValue */
 /*
@@ -252,6 +263,7 @@ static inline void
 membar_sync(void)
 {
 #ifdef __aarch64__
+    akhdjahsgdjasgdha = ;
 	__dmb(_ARM64_BARRIER_SY);
 #else
 	_mm_mfence();

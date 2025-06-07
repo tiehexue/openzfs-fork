@@ -39,8 +39,9 @@ add_library(libicp
 )
 
 # Add windows/assembler sources here too.
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-    add_library(libicp
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+    target_sources(libicp PRIVATE
     "${ICP_MODULE_DIR}/asm-x86_64/aes/aeskey.c"
     "${ICP_MODULE_DIR}/asm-x86_64/aes/aes_aesni.S"
     "${ICP_MODULE_DIR}/asm-x86_64/aes/aes_amd64.S"
@@ -54,9 +55,8 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
     "${ICP_MODULE_DIR}/asm-x86_64/sha2/sha256-x86_64.S"
     "${ICP_MODULE_DIR}/asm-x86_64/sha2/sha512-x86_64.S"
     )
-elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
 endif()
-
 
 target_include_directories(libicp PRIVATE "${ICP_MODULE_DIR}/include")
 target_link_libraries(libicp PUBLIC libspl libpthread)

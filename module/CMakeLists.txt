@@ -9,15 +9,50 @@ if (NOT INF2CAT_PROGRAM)
 	message(FATAL_ERROR "Failed to find inf2cat.exe")
 endif()
 
-find_program(SIGNTOOL_PROGRAM
-	signtool
-	PATHS "${WDK_ROOT}/bin/${WDK_VERSION}/${WDK_PLATFORM}"
-	NO_DEFAULT_PATH
-)
+# Alas FindWDK sets SIGNTOOL without cross-compiling understanding.
+unset(SIGNTOOL_PROGRAM CACHE)
+unset(STAMPINF_PROGRAM CACHE)
+
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86")
+	find_program(SIGNTOOL_PROGRAM
+		signtool
+		HINTS "${WDK_ROOT}/bin/${WDK_VERSION}/x86"
+		NO_DEFAULT_PATH
+	)
+	find_program(STAMPINF_PROGRAM
+		stampinf
+		HINTS "${WDK_ROOT}/bin/${WDK_VERSION}/x86"
+		NO_DEFAULT_PATH
+	)
+elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
+	find_program(SIGNTOOL_PROGRAM
+		signtool
+		HINTS "${WDK_ROOT}/bin/${WDK_VERSION}/x64"
+		NO_DEFAULT_PATH
+	)
+	find_program(STAMPINF_PROGRAM
+		stampinf
+		HINTS "${WDK_ROOT}/bin/${WDK_VERSION}/x64"
+		NO_DEFAULT_PATH
+	)
+elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+	find_program(SIGNTOOL_PROGRAM
+		signtool
+		HINTS "${WDK_ROOT}/bin/${WDK_VERSION}/arm64"
+		NO_DEFAULT_PATH
+	)
+	find_program(STAMPINF_PROGRAM
+		stampinf
+		HINTS "${WDK_ROOT}/bin/${WDK_VERSION}/arm64"
+		NO_DEFAULT_PATH
+	)
+endif()
 
 if (NOT SIGNTOOL_PROGRAM)
 	message(FATAL_ERROR "Failed to find signtool.exe")
 endif()
+
+message(STATUS "SIGNTOOL set to ${SIGNTOOL_PROGRAM}")
 
 find_program(STAMPINF_PROGRAM
 	stampinf
@@ -46,10 +81,15 @@ add_definitions(
 	-D_CRT_SECURE_NO_WARNINGS
 	-D_CRT_NONSTDC_NO_WARNINGS
 )
-list(APPEND WDK_COMPILE_DEFINITIONS	-D_KERNEL -D__KERNEL__)
 list(APPEND WDK_COMPILE_FLAGS
 	$<IF:$<CONFIG:Debug>,/MTd,/MT>
 )
+#list(APPEND WDK_LINK_FLAGS
+#	/DEBUG
+#)
+
+message(STATUS "WDK_COMPILE_FLAGS is now ${WDK_COMPILE_FLAGS}")
+
 
 set(CMAKE_C_STANDARD_LIBRARIES "")
 
@@ -86,6 +126,7 @@ string(REGEX REPLACE "[-/]DWIN32" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
 set(CRT_LINK_REGEX "/M[TD]d?")
 string(REGEX MATCH "${CRT_LINK_REGEX}" CRT_FLAG_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
 string(REGEX REPLACE "${CRT_LINK_REGEX}" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+message(STATUS "CMAKE_C_FLAGS_DEBUG is now ${CMAKE_C_FLAGS_DEBUG}")
 
 string(REGEX MATCH "${CRT_LINK_REGEX}" CRT_FLAG_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL}")
 string(REGEX REPLACE "${CRT_LINK_REGEX}" "" CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL}")
@@ -103,6 +144,9 @@ add_compile_options(
 	$<$<AND:$<CONFIG:RelWithDebInfo>,$<NOT:$<BOOL:$<TARGET_PROPERTY:WDK_TARGET>>>>:${CRT_FLAG_RELWITHDEBINFO}>
 )
 
+message(STATUS "CRT_FLAG_DEBUG is now ${CRT_FLAG_DEBUG}")
+
+
 function(um_add_executable name)
 	add_executable(${ARGV})
 
@@ -114,25 +158,11 @@ function(um_add_executable name)
 		#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /s "${OPENZFS_SIGNTOOL_CERTSTORE}" /n "${OPENZFS_SIGNTOOL_CERTNAME}" /tr "${OPENZFS_SIGNTOOL_TSA}" $<TARGET_FILE:${name}>
 		#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /sha1 "${OPENZFS_SIGNTOOL_SHA1}" /t "${OPENZFS_SIGNTOOL_TSA}" $<TARGET_FILE:${name}>
 		# Lundman's line
-#		COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /td sha256 /sha1 "${OPENZFS_SIGNTOOL_SHA1}" /tr "${OPENZFS_SIGNTOOL_TSA}" $<TARGET_FILE:${name}>
+		COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /td sha256 /sha1 "${OPENZFS_SIGNTOOL_SHA1}" /tr "${OPENZFS_SIGNTOOL_TSA}" $<TARGET_FILE:${name}>
 		WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 		VERBATIM COMMENT "Sign userspace tool"
 	)
 endfunction()
-
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-	message(STATUS "Configuring for Intel x64/amd64")
-	if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-		add_compile_options(-m32)
-	else()
-		add_compile_options(-m64)
-	endif()
-elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
-	message(STATUS "Configuring for ARM64")
-	add_compile_options(-target aarch64-pc-windows-msvc)
-else()
-	message(STATUS "Unknown architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-endif()
 
 
 set(OpenZFS_ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}")

@@ -101,7 +101,7 @@ static intptr_t stack_remaining(void) {
 
 typedef	struct _label_t { long long unsigned val[JMP_BUF_CNT]; } label_t;
 
-#if !defined (_WIN32) && !defined (__aarch64__)
+#if !defined (_WIN32) || !defined (__aarch64__)
 int ASMABI setjmp(label_t *) __attribute__ ((__nothrow__));
 extern __attribute__((noreturn)) void ASMABI longjmp(label_t *);
 #endif

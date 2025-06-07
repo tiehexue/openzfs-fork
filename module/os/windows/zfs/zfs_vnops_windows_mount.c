@@ -524,7 +524,7 @@ NotifyVolumeArrival(PUNICODE_STRING unicodeSourceVolumeName)
 	ULONG QueryAutoMountSize = sizeof (MOUNTMGR_QUERY_AUTO_MOUNT);
 
 	SendIoctlToMountManager(IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT, NULL, 0,
-	    &QueryAutoMount, &QueryAutoMountSize);
+	    &QueryAutoMount, QueryAutoMountSize);
 
 	dprintf("%s: AutoMount is %s\n", __func__,
 	    QueryAutoMount.CurrentState == 0 ? "Disabled" : "Enabled");

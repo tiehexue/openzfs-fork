@@ -110,8 +110,6 @@
 
 #include <sys/openzvol.h>
 
-#pragma comment(lib, "FltMgr.lib")
-
 DRIVER_INITIALIZE DriverEntry;
 DRIVER_UNLOAD OpenZFS_Fini;
 #pragma alloc_text(INIT, DriverEntry)

@@ -34,7 +34,7 @@ OpenZVOL.DllFiles          = 11            ;%windir%\system32
 ;AddService  = %ServiceName%,0x802,OpenZVOL.Service
 
 [Manufacturer]
-%Me%=Standard,NTamd64,NTx86
+%Me%=Standard,NTamd64,NTx86,NTarm64
 
 [Standard.NTamd64]
 ;%VolumeName% = OpenZVOL_Install, OpenZVOLVolume
@@ -42,6 +42,11 @@ OpenZVOL.DllFiles          = 11            ;%windir%\system32
 ;%ControllerName% = OpenZVOL_Install, ROOT\OpenZVOL
 
 [Standard.NTx86]
+;%VolumeName% = OpenZVOL_Install, OpenZVOLVolume
+%DriverName% = OpenZVOL_Install, ROOT\OpenZVOL
+;%ControllerName% = OpenZVOL_Install, ROOT\OpenZVOL
+
+[Standard.NTarm64]
 ;%VolumeName% = OpenZVOL_Install, OpenZVOLVolume
 %DriverName% = OpenZVOL_Install, ROOT\OpenZVOL
 ;%ControllerName% = OpenZVOL_Install, ROOT\OpenZVOL
@@ -56,6 +61,7 @@ AddReg       = OpenZVOL_AddReg
 ;HKR,,Type,0x00010001,0x00000002 ; FILE_SYSTEM_DRIVER
 ;HKR,,System.Devices.ContainerID,, "{00000001-0002-0003-0004-000000000001}"
 ;HKR,,Group,0x00000000,"File System"
+HKR,,"UpperFilters",0x00010008,"OpenZVOL"
 
 ;;,OpenZVOL.DllFiles
 ;;RegisterDlls = shellOpenZVOL
@@ -111,6 +117,10 @@ OpenZVOL.sys = 1,,
 ;;,\x86
 
 [SourceDisksNames.amd64]
+1 = %DiskId1%,,
+;;,\x64
+
+[SourceDisksNames.arm64]
 1 = %DiskId1%,,
 ;;,\x64
 

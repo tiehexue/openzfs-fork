@@ -38,8 +38,9 @@ wdk_add_library(icpkern
   spi/kcf_spi.c
 )
 
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-	wdk_add_library(icpkern
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+	target_sources(icpkern PRIVATE
 	  asm-x86_64/aes/aeskey.c
 	  asm-x86_64/aes/aes_aesni.S
 	  asm-x86_64/aes/aes_amd64.S
@@ -53,7 +54,7 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
 	  asm-x86_64/sha2/sha256-x86_64.S
 	  asm-x86_64/sha2/sha512-x86_64.S
 	)
-elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
 endif()
 
 
