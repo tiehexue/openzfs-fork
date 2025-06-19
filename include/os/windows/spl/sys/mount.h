@@ -93,7 +93,7 @@ typedef enum _FSD_IDENTIFIER_TYPE {
 	MOUNT_TYPE_CCB = ':CCB', // Context Control Block
 } FSD_IDENTIFIER_TYPE;
 
-typedef enum mount_type mount_type_t;
+// typedef enum mount_type mount_type_t;
 
 struct mount
 {

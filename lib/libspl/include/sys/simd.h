@@ -523,7 +523,8 @@ zfs_sha256_available(void)
 static inline boolean_t
 zfs_neon_available(void)
 {
-    return (IsProcessorFeaturePresent(PF_ARM_VFP_32_REGISTERS_AVAILABLE));
+	return (IsProcessorFeaturePresent(
+	    PF_ARM_VFP_32_REGISTERS_AVAILABLE));
 }
 
 /*
@@ -532,7 +533,8 @@ zfs_neon_available(void)
 static inline boolean_t
 zfs_sha256_available(void)
 {
-    return (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE));
+	return (IsProcessorFeaturePresent(
+	    PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE));
 }
 
 /*
@@ -541,7 +543,8 @@ zfs_sha256_available(void)
 static inline boolean_t
 zfs_sha512_available(void)
 {
-    return (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE));
+	return (IsProcessorFeaturePresent(
+	    PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE));
 }
 
 #else

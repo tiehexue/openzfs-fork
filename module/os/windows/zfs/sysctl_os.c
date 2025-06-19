@@ -280,7 +280,8 @@ sysctl_os_process(PUNICODE_STRING pRegistryPath, ztunable_t *zt)
 					if (!(zt->zt_flag & ZT_FLAG_STATIC)) {
 
 						if (maybestr != NULL)
-							ExFreePool((void *)*maybestr);
+							ExFreePool((void *)
+							    *maybestr);
 
 						(*(void **)maybestr) = NULL;
 					}

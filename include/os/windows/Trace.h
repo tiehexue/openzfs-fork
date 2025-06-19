@@ -24,6 +24,9 @@
 
 #pragma once
 
+#pragma clang diagnostic ignored "-Wignored-attributes"
+#pragma clang diagnostic ignored "-Wextern-initializer"
+
 static const int TRACE_FATAL = 1;
 static const int TRACE_ERROR = 2;
 static const int TRACE_WARNING = 3;
