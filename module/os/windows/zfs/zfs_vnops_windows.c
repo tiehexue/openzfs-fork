@@ -7264,7 +7264,7 @@ _Function_class_(DRIVER_DISPATCH)
 	case IRP_MJ_CREATE:
 		dprintf("IRP_MJ_CREATE: zfsdev FileObject %p name '%wZ' "
 		    "length %u flags 0x%x\n",
-		    IrpSp->FileObject, IrpSp->FileObject->FileName,
+		    IrpSp->FileObject, &IrpSp->FileObject->FileName,
 		    IrpSp->FileObject->FileName.Length, IrpSp->Flags);
 		Status = zfsdev_open((dev_t)IrpSp->FileObject, Irp);
 		break;
@@ -7509,7 +7509,7 @@ _Function_class_(DRIVER_DISPATCH)
 		    IrpSp->FileObject,
 		    IrpSp->FileObject ?
 		    IrpSp->FileObject->RelatedFileObject : NULL,
-		    IrpSp->FileObject->FileName, IrpSp->Flags);
+		    &IrpSp->FileObject->FileName, IrpSp->Flags);
 
 		Status = volume_create(DeviceObject, IrpSp->FileObject,
 		    IrpSp->Parameters.Create.ShareAccess,
@@ -7957,7 +7957,7 @@ _Function_class_(DRIVER_DISPATCH)
 			    IrpSp->FileObject ?
 			    IrpSp->FileObject->RelatedFileObject :
 			    NULL,
-			    IrpSp->FileObject->FileName, IrpSp->Flags,
+			    &IrpSp->FileObject->FileName, IrpSp->Flags,
 			    IrpSp->Parameters.Create.ShareAccess,
 			    create_options(IrpSp->Parameters.Create.Options),
 			    IrpSp->Parameters.Create.FileAttributes,

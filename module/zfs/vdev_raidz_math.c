@@ -673,7 +673,7 @@ zfs_vdev_raidz_impl_get(char *buffer, zfs_kernel_param_t *kp)
 int
 win32_zfs_vdev_raidz_impl_set(ZFS_MODULE_PARAM_ARGS)
 {
-	static char str[1024] = "";
+	static char str[PAGE_SIZE] = "";
 
 	*type = ZT_TYPE_STRING;
 

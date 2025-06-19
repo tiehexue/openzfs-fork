@@ -3538,7 +3538,7 @@ set_file_disposition_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		dprintf("Deletion %s on '%wZ'\n",
 		    flags & FILE_DISPOSITION_DELETE ? "set" : "unset",
-		    IrpSp->FileObject->FileName);
+		    &IrpSp->FileObject->FileName);
 		Status = STATUS_SUCCESS;
 		if (flags & FILE_DISPOSITION_DELETE) {
 			Status = zfs_setunlink(IrpSp->FileObject, NULL);

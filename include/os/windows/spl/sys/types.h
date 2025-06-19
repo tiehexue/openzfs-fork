@@ -99,10 +99,26 @@ typedef uintptr_t pc_t;
 #include <ntddk.h>
 
 
-#define	snprintf _snprintf
+// #define	snprintf _snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
-#define	vsnprintf _vsnprintf
+// #define	vsnprintf _vsnprintf
+
+// Replace snprintf/vsnprintf with kernel-safe versions
+extern int spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
+
+#define	vsnprintf spl_vsnprintf
+#define	_vsnprintf spl_vsnprintf
+
+static inline int
+snprintf(char *buffer, size_t bufSize, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	int ret = vsnprintf(buffer, bufSize, fmt, args);
+	va_end(args);
+	return (ret);
+}
 
 #ifndef ULLONG_MAX
 #define	ULLONG_MAX			(~0ULL)
