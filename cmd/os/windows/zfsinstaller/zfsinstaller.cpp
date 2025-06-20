@@ -79,7 +79,8 @@ enum manifest_install_types
 
 void clean_extra_installs(void);
 void CleanupOpenZFSDriverPackages(void);
-
+bool install_zed(void);
+bool uninstall_zed(void);
 
 int
 session_exists(void)
@@ -134,7 +135,8 @@ validate_flag_level(const char *str, size_t len)
 
 int
 validate_args(const char *flags, const char *levels,
-	int size_in_mb, const char *etl_file) {
+	int size_in_mb, const char *etl_file)
+{
 	if (validate_flag_level(flags, 8)) {
 		fprintf(stderr, "Valid input for flags should be in "
 			"interval [0x0, 0xffffffff]\n");
@@ -204,7 +206,8 @@ hex_modify(std::string& hex)
 	hex = std::string("0x") + hex;
 }
 
-std::string get_cwd() {
+std::string get_cwd()
+{
 	CHAR cwd_path[MAX_PATH_LEN] = { 0 };
 	DWORD len = GetCurrentDirectoryA(MAX_PATH_LEN, cwd_path);
 	(void)len;
@@ -387,6 +390,8 @@ perf_counters_uninstall(char *inf_path)
 int
 main(int argc, char *argv[])
 {
+	bool zed_service = FALSE;
+
 	if (argc < 2) {
 		fprintf(stderr, "too few arguments \n");
 		printUsage();
@@ -398,10 +403,21 @@ main(int argc, char *argv[])
 		return (ERROR_BAD_ARGUMENTS);
 	}
 
+	// ew manual arg parsing when we have getopt?
 	if (strcmp(argv[1], "install") == 0) {
+
+		if ((argc == 5) && strcmp(argv[2], "-z") == 0) {
+				zed_service = TRUE;
+				argv++;
+				argc--;
+		}
+
 		if (argc == 4) {
 			zfs_install(argv[2]);
 			zvol_install(argv[3]);
+			if (zed_service)
+				install_zed();
+
 			fprintf(stderr, "Installation done.");
 		} else {
 			fprintf(stderr, "Incorrect argument usage\n");
@@ -409,12 +425,21 @@ main(int argc, char *argv[])
 			return (ERROR_BAD_ARGUMENTS);
 		}
 	} else if (strcmp(argv[1], "uninstall") == 0) {
+
+		if ((argc == 5) && strcmp(argv[2], "-z") == 0) {
+			zed_service = TRUE;
+			argv++;
+			argc--;
+		}
+
 		if (argc == 4) {
 			int ret = zfs_uninstall(argv[2]);
 			if (0 == ret)
 				ret = zvol_uninstall(argv[3]);
 			if (0 == ret)
-				return (zfs_log_session_delete());
+				zfs_log_session_delete();
+			if (zed_service)
+				uninstall_zed();
 			printf("[1/4] Cleaning up extra installs of OpenZFS and OpenZVOL\n");
 			clean_extra_installs();
 			CleanupOpenZFSDriverPackages();
@@ -443,10 +468,12 @@ void
 printUsage() {
 	fprintf(stderr, "\nUsage:\n\n");
 	fprintf(stderr, "Install driver per INF DefaultInstall section:\n");
-	fprintf(stderr, "zfsinstaller install OpenZFS.inf OpenZVOL.inf\n");
+	fprintf(stderr, "zfsinstaller install [-z] OpenZFS.inf OpenZVOL.inf\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Uninstall driver per INF DefaultUninstall section:\n");
-	fprintf(stderr, "zfsinstaller uninstall OpenZFS.inf OpenZVOL.inf\n");
+	fprintf(stderr, "zfsinstaller uninstall [-z] OpenZFS.inf OpenZVOL.inf\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "Use -z to also install/uninstall zed service\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "zfsinstaller trace [-f Flags] | [-l Levels]"
 		" | [-s SizeOfETLInMB] | [-p AbsolutePathOfETL]\n");
@@ -987,7 +1014,7 @@ clean_extra_installs(void)
 					HKEY hKey;
 					char fullPath[MAX_PATH] = "";
 					snprintf(fullPath, sizeof(fullPath),
-						"SYSTEM\\CurrentControlSet\\Control\\Class\\%s", regSubKey);
+						"SYSTEM\\CurrentControlSet\\Control\\Class\\%ls", regSubKey);
 
 					if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, fullPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
 						DWORD infSize = sizeof(infFile);
@@ -1117,4 +1144,107 @@ CleanupOpenZFSDriverPackages(void)
 	}
 	RegCloseKey(infFilesKey);
 	printf("[3/4] Done.\n");
+}
+
+
+
+// #include <windows.h>
+// #include <winsvc.h>
+#include <shlobj.h>  // For SHGetFolderPath
+// #include <strsafe.h>
+
+bool
+install_zed(void)
+{
+	wchar_t exePath[MAX_PATH];
+	if (!SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES, NULL, 0, exePath))) {
+		wprintf(L"Failed to get Program Files path.\n");
+		return false;
+	}
+
+	// Append subfolder and executable
+	if (FAILED(StringCchCatW(exePath, MAX_PATH, L"\\OpenZFS on Windows\\zed.exe"))) {
+		wprintf(L"Path too long.\n");
+		return false;
+	}
+
+	// Open SCM
+	SC_HANDLE hSCManager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+	if (!hSCManager) {
+		wprintf(L"OpenSCManager failed (%lu)\n", GetLastError());
+		return false;
+	}
+
+	// Create the service
+	SC_HANDLE hService = CreateServiceW(
+		hSCManager,
+		L"OpenZFS_zed",                 // Service name
+		L"OpenZFS ZED Event Daemon",   // Display name
+		SERVICE_ALL_ACCESS,
+		SERVICE_WIN32_OWN_PROCESS,
+		SERVICE_AUTO_START,
+		SERVICE_ERROR_NORMAL,
+		exePath,
+		NULL, NULL, NULL, NULL, NULL
+	);
+
+	if (!hService) {
+		DWORD err = GetLastError();
+		if (err == ERROR_SERVICE_EXISTS) {
+			wprintf(L"ZED service already exists, skipping creation.\n");
+		} else {
+			wprintf(L"CreateService failed (%lu)\n", err);
+			CloseServiceHandle(hSCManager);
+			return false;
+		}
+	} else {
+		wprintf(L"ZED service created successfully.\n");
+		StartService(hService, 0, NULL);
+
+		CloseServiceHandle(hService);
+	}
+
+	CloseServiceHandle(hSCManager);
+	return true;
+}
+
+
+bool
+uninstall_zed()
+{
+	SC_HANDLE hSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+	if (!hSCManager) {
+		printf("Failed to open Service Control Manager (error %lu)\n", GetLastError());
+		return false;
+	}
+
+	SC_HANDLE hService = OpenServiceA(hSCManager, "OpenZFS_zed", SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+	if (!hService) {
+		printf("ZED service not found (may already be uninstalled)\n");
+		CloseServiceHandle(hSCManager);
+		return true;
+	}
+
+	// Try to stop the service if it's running
+	SERVICE_STATUS status;
+	if (ControlService(hService, SERVICE_CONTROL_STOP, &status)) {
+		printf("Stopping ZED service...\n");
+		Sleep(1000); // Optional: allow time for it to stop
+	}
+
+	if (!DeleteService(hService)) {
+		printf("Failed to delete ZED service (error %lu)\n", GetLastError());
+		CloseServiceHandle(hService);
+		CloseServiceHandle(hSCManager);
+		return false;
+	}
+
+	printf("ZED service uninstalled successfully.\n");
+	CloseServiceHandle(hService);
+	CloseServiceHandle(hSCManager);
+
+	// Optionally remove zed.txt log file
+	DeleteFileA("C:\\Program Files\\OpenZFS on Windows\\zed.txt");
+
+	return true;
 }

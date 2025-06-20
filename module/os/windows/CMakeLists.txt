@@ -55,14 +55,13 @@ set_target_properties(OpenZFS
 
 configure_file(OpenZFS.inf "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.inf" COPYONLY)
 configure_file(OpenZFS.man "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.man" COPYONLY)
-configure_file(OpenZFS.inf "${CMAKE_CURRENT_BINARY_DIR}/driver/zed.inf" COPYONLY)
 
 add_custom_command(
 	TARGET OpenZFS
 	POST_BUILD
 	BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
-    COMMAND "${STAMPINF_PROGRAM}" -d "*" -a "amd64" -v "*" -f "${CMAKE_CURRENT_BINARY_DIR}\\driver\\OpenZFS.inf"
-	COMMAND "${INF2CAT_PROGRAM}" /verbose "/driver:${CMAKE_CURRENT_BINARY_DIR}/driver" /os:10_19H1_X86,10_19H1_X64,ServerRS5_X64 /uselocaltime
+    COMMAND "${STAMPINF_PROGRAM}" -d "*" -v "*" -f "${CMAKE_CURRENT_BINARY_DIR}\\driver\\OpenZFS.inf"
+	COMMAND "${INF2CAT_PROGRAM}" /verbose "/driver:${CMAKE_CURRENT_BINARY_DIR}/driver" /os:10_19H1_X86,10_19H1_X64,10_19H1_ARM64,ServerRS5_X64 /uselocaltime
 	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /s "${OPENZFS_SIGNTOOL_CERTSTORE}" /n "${OPENZFS_SIGNTOOL_CERTNAME}" /t "${OPENZFS_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
 	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /sha1 "${OPENZFS_SIGNTOOL_SHA1}" /t "${OPENZFS_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
 	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /s "${OPENZFS_SIGNTOOL_CERTSTORE}" /n "${OPENZFS_SIGNTOOL_CERTNAME}" /tr "${OPENZFS_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
@@ -76,8 +75,6 @@ add_custom_command(
 	WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/driver"
 	VERBATIM COMMENT "Generating and signing OpenZFS.cat file"
 )
-
-add_dependencies(OpenZFS zed_cat)
 	
 install(TARGETS OpenZFS RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/driver")
 install(FILES 
