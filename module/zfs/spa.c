@@ -1231,50 +1231,15 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 			    spa->spa_proc, zio_taskq_basedc, flags);
 		} else {
 #endif
-			pri_t pri = maxclsyspri;
 			/*
 			 * The write issue taskq can be extremely CPU
 			 * intensive.  Run it at slightly less important
 			 * priority than the other taskqs.
-			 *
-			 * Under Linux and FreeBSD this means incrementing
-			 * the priority value as opposed to platforms like
-			 * illumos where it should be decremented.
-			 *
-			 * On FreeBSD, if priorities divided by four (RQ_PPQ)
-			 * are equal then a difference between them is
-			 * insignificant.
 			 */
-			if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE) {
-#if defined(__linux__)
-				pri++;
-#elif defined(__FreeBSD__)
-				pri += 4;
-#elif defined(__APPLE__)
-				pri -= 4;
-#if defined(_KERNEL)
-			} else {
-				/*
-				 * we want to be below maclsyspri for zio
-				 * taskqs on macOS, to avoid starving out
-				 * base=81 (maxclsyspri) kernel tasks when
-				 * doing computation-intensive checksums etc.
-				 */
-				pri -= 1;
-			}
-			/* macOS cannot handle TASKQ_DYNAMIC zio taskqs */
+			const pri_t pri = (t == ZIO_TYPE_WRITE &&
+			    q == ZIO_TASKQ_ISSUE) ?
+			    wtqclsyspri : maxclsyspri;
 
-			if ((flags & (TASKQ_DC_BATCH|TASKQ_DUTY_CYCLE)) == 0)
-				flags |= TASKQ_TIMESHARE;
-
-			if (flags & TASKQ_DYNAMIC) {
-				flags &= ~TASKQ_DYNAMIC;
-				/* fallthrough to closing brace after #endif */
-#endif
-#else
-#error "unknown OS"
-#endif
-			}
 			tq = taskq_create_proc(name, value, pri, 50,
 			    INT_MAX, spa->spa_proc, flags);
 #ifdef HAVE_SYSDC
