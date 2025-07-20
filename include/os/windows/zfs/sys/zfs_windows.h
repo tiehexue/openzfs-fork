@@ -139,8 +139,8 @@ extern int	zfs_build_path(znode_t *start_zp, znode_t *start_parent,
 extern int	zfs_build_path_stream(znode_t *start_zp, znode_t *start_parent,
     char **fullpath, uint32_t *returnsize, uint32_t *start_zp_offset, char *);
 
-extern int	xattr_protected(char *name);
-extern int	xattr_stream(char *name);
+extern int	xattr_protected(const char *name);
+extern int	xattr_stream(const char *name);
 extern uint64_t xattr_getsize(struct vnode *vp);
 extern char *major2str(int major, int minor);
 extern char *common_status_str(NTSTATUS Status);

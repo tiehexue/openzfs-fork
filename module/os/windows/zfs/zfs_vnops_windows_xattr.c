@@ -89,11 +89,46 @@
 #include <sys/zpl.h>
 // #include <sys/xattr.h>
 
+/*
+ * It is somewhat confusing to mix Unix and Windows
+ * error codes in here, so this file will stay in Unix
+ * so future comparison with upstream sources will be
+ * easier. Then just before returning from the get or
+ * set functions, we change them to the expected Windows
+ * STATUS codes.
+ */
+NTSTATUS
+error_unix2win(int error)
+{
+	switch (error) {
+	case 0:
+		return (STATUS_SUCCESS);
+	case ENOENT: // Probably wont be returned
+	case ENODATA: // converted to this
+		return (STATUS_NO_EAS_ON_FILE);
+	case EFBIG:
+		return (STATUS_EA_TOO_LARGE);
+	case EEXIST:
+		return (STATUS_OBJECT_NAME_COLLISION);
+	case EINVAL:
+		return (STATUS_INVALID_PARAMETER);
+	case EACCES:
+		return (STATUS_ACCESS_DENIED);
+	case ERANGE:
+		return (STATUS_BUFFER_OVERFLOW);
+	case ENXIO:
+		return (STATUS_EA_CORRUPT_ERROR);
+	}
+	return (error);
+}
+
+
+
 // Windows has no concept of these, it will always replace
 // existing xattrs. Callers will need to check for existence
 // by hand.
-#define	XATTR_CREATE 0
-#define	XATTR_REPLACE 0
+#define	XATTR_CREATE (1<<0)
+#define	XATTR_REPLACE (1<<1)
 
 #define	XATTR_USER_PREFIX		"windows:"
 #define	XATTR_USER_PREFIX_LEN	strlen("windows:")
@@ -101,8 +136,10 @@
 void
 strlower(char *s)
 {
-	while (*s != 0)
-		*s++ = tolower(*s);
+	while (*s != 0) {
+		*s = tolower(*s);
+		s++;
+	}
 }
 
 enum xattr_permission {
@@ -115,7 +152,7 @@ static unsigned int zfs_xattr_compat = 0;
 
 // return true if a XATTR name should be skipped
 int
-xattr_protected(char *name)
+xattr_protected(const char *name)
 {
 	if (strcmp(EA_NTACL, name) == 0)
 		return (1);
@@ -225,13 +262,14 @@ zpl_xattr_filldir(struct vnode *dvp, zfs_uio_t *uio, const char *name,
 
 	/* Will it fit */
 	if (needed_total + readmax > zfs_uio_resid(uio))
-		return (STATUS_BUFFER_OVERFLOW);
+		return (ERANGE);
 
 	unsigned char *outbuffer;
 	outbuffer = zfs_uio_iovbase(uio, 0);
 
 	// the data should now fit.
-	ea = &outbuffer[zfs_uio_offset(uio) + alignment];
+	ea = (FILE_FULL_EA_INFORMATION *)
+	    &outbuffer[zfs_uio_offset(uio) + alignment];
 
 	// Room for one more struct, update previous's next ptr
 	if (*previous_ea != NULL) {
@@ -318,7 +356,7 @@ zpl_xattr_readdir(struct vnode *dxip, struct vnode *dvp, zfs_uio_t *uio)
 	while ((error = zap_cursor_retrieve(&zc, zap)) == 0) {
 
 		if (zap->za_integer_length != 8 || zap->za_num_integers != 1) {
-			error = STATUS_EA_CORRUPT_ERROR;
+			error = ENXIO;
 			break;
 		}
 
@@ -510,7 +548,7 @@ zpl_xattr_get_dir(struct vnode *ip, const char *name, zfs_uio_t *uio,
 		goto out;
 
 	if (zfs_uio_resid(uio) < xzp->z_size) {
-		error = STATUS_BUFFER_OVERFLOW;
+		error = ERANGE;
 		goto out;
 	}
 
@@ -600,7 +638,7 @@ zpl_xattr_get_sa(struct vnode *ip, const char *name, zfs_uio_t *uio,
 		return (0);
 
 	if (zfs_uio_resid(uio) < nv_size)
-		return (STATUS_BUFFER_OVERFLOW);
+		return (ERANGE);
 
 	// uiomove uses skip and not offset to start.
 	zfs_uio_setskip(uio, zfs_uio_offset(uio));
@@ -632,8 +670,6 @@ __zpl_xattr_get(struct vnode *ip, const char *name, zfs_uio_t *uio,
 	error = zpl_xattr_get_dir(ip, name, uio, retsize, cr);
 
 out:
-	if (error == ENOENT)
-		error = STATUS_NO_EAS_ON_FILE;
 
 	return (error);
 }
@@ -672,7 +708,7 @@ __zpl_xattr_where(struct vnode *ip, const char *name, int *where, cred_t *cr)
 		cmn_err(CE_WARN, "ZFS: inode %p has xattr \"%s\""
 		    " in both SA and dir", ip, name);
 	if (*where == XATTR_NOENT)
-		error = STATUS_NO_EAS_ON_FILE;
+		error = ENODATA;
 	else
 		error = 0;
 
@@ -701,13 +737,13 @@ zpl_xattr_get(struct vnode *ip, const char *name, zfs_uio_t *uio,
 	error = __zpl_xattr_get(ip, xattr_name, uio, retsize, cr);
 	kmem_strfree(xattr_name);
 
-	if (error == STATUS_NO_EAS_ON_FILE)
+	if (error == ENODATA)
 		error = __zpl_xattr_get(ip, name, uio, retsize, cr);
 
 	rw_exit(&zp->z_xattr_lock);
 	zfs_exit(zfsvfs, FTAG);
 
-	return (error);
+	return (error_unix2win(error));
 }
 
 static int
@@ -807,7 +843,7 @@ out:
 		zrele(dxzp);
 
 	if (error == ENOENT)
-		error = STATUS_NO_EAS_ON_FILE;
+		error = ENODATA;
 
 	return (error);
 }
@@ -864,7 +900,7 @@ zpl_xattr_set_sa(struct vnode *ip, const char *name, zfs_uio_t *uio,
 		if (zfs_uio_resid(uio) > DXATTR_MAX_ENTRY_SIZE) {
 			if (lowername)
 				spa_strfree(lowername);
-			return (STATUS_EA_TOO_LARGE);
+			return (EFBIG);
 		}
 
 		/* Prevent the DXATTR SA from consuming the entire SA region */
@@ -878,7 +914,7 @@ zpl_xattr_set_sa(struct vnode *ip, const char *name, zfs_uio_t *uio,
 		if (sa_size > DXATTR_MAX_SA_SIZE) {
 			if (lowername)
 				spa_strfree(lowername);
-			return (STATUS_EA_TOO_LARGE);
+			return (EFBIG);
 		}
 
 		/*
@@ -954,7 +990,7 @@ _zpl_xattr_set(struct vnode *ip, const char *name, zfs_uio_t *uio, int flags,
 
 	error = __zpl_xattr_where(ip, name, &where, cr);
 	if (error != 0) {
-		if (error != STATUS_NO_EAS_ON_FILE)
+		if (error != ENODATA)
 			goto out;
 		if (flags & XATTR_REPLACE)
 			goto out;
@@ -1022,6 +1058,9 @@ zpl_xattr_set(struct vnode *ip, const char *name, zfs_uio_t *uio, int flags,
 {
 	int error;
 
+	if (zfs_is_readonly(VTOZ(ip)->z_zfsvfs))
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
 	/*
 	 * Remove alternate compat version of the xattr so we only set the
 	 * version specified by the zfs_xattr_compat tunable.
@@ -1069,7 +1108,7 @@ zpl_xattr_set(struct vnode *ip, const char *name, zfs_uio_t *uio, int flags,
 	error = _zpl_xattr_set(ip, set_name, uio, flags, cr);
 out:
 	kmem_strfree(prefixed_name);
-	return (error);
+	return (error_unix2win(error));
 }
 
 

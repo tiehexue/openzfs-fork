@@ -734,30 +734,43 @@ vnode_apply_single_ea(struct vnode *vp, struct vnode *xdvp,
 	int error;
 	znode_t *xzp = NULL;
 	vnode_t *xvp = NULL;
+	struct iovec iov;
+
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
 	dprintf("%s: xattr '%.*s' valuelen %u\n", __func__,
 	    ea->EaNameLength, ea->EaName, ea->EaValueLength);
 
-	if (ea->EaValueLength > 0) {
-		/* Write data */
-		struct iovec iov;
+	// EaValueLength of zero, means no value, not delete.
+	if (ea->EaValueLength == 0) {
+		iov.iov_base = (void *)NULL;
+		iov.iov_len = 0;
+	} else {
 		iov.iov_base = (void *)(ea->EaName + ea->EaNameLength + 1);
 		iov.iov_len = ea->EaValueLength;
-
-		zfs_uio_t uio;
-		zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE,
-		    ea->EaValueLength, 0);
-
-		error = zpl_xattr_set(vp, ea->EaName, &uio, 0, NULL);
-	} else {
-		error = zpl_xattr_set(vp, ea->EaName, NULL, 0, NULL);
 	}
-	return (error);
+
+	zfs_uio_t uio;
+	zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE,
+	    ea->EaValueLength, 0);
+
+	error = zpl_xattr_set(vp, ea->EaName, &uio, 0, NULL);
+
+	return (0);
 }
 
 
 /*
  * Apply a set of EAs to a vnode, while handling special Windows EAs that
  * set UID/GID/Mode/rdev.
+ * According to ChatGPT, if the LIST is empty, all the xattrs should be
+ * removed. (Keeping any non-xattr entries, like NTACL etc)
+ * Otherwise, update the xattrs for each EA. Note that an
+ * EA with EaValueLength==0 is not a delete request, but a
+ * no-value request. There is no way to delete a single
+ * EA, it is expected that Windows sends an empty list
+ * to delete all EAs, then a list of the other EAs to restore.
  */
 NTSTATUS
 vnode_apply_eas(struct vnode *vp, zfs_ccb_t *zccb,
@@ -766,8 +779,19 @@ vnode_apply_eas(struct vnode *vp, zfs_ccb_t *zccb,
 {
 	NTSTATUS Status = STATUS_SUCCESS;
 
-	if (vp == NULL || eas == NULL)
+	if (vp == NULL)
 		return (STATUS_INVALID_PARAMETER);
+
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
+	if (eas == NULL || eaLength == 0) {
+		dprintf("%s: delete all xattr request.\n", __func__);
+		// Delete all xattrs.
+		// Status = zpl_xattr_remove_all(vp);
+		vnode_clear_easize(vp);
+		return (Status);
+	}
 
 	// Optional: Check for validity if the caller wants it.
 	if (pEaErrorOffset != NULL) {
@@ -2807,6 +2831,9 @@ zfs_save_ntsecurity(struct vnode *vp)
 	if (zfsctl_is_node(VTOZ(vp)))
 		return;
 
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return; // (STATUS_MEDIA_WRITE_PROTECTED);
+
 	iov.iov_base = vnode_security(vp);
 	iov.iov_len = RtlLengthSecurityDescriptor(iov.iov_base);
 
@@ -2867,6 +2894,28 @@ zfs_load_ntsecurity(struct vnode *vp)
 		dprintf("%s: invalid NTSecurity xattr\n", __func__);
 	}
 	ExFreePool(sd);
+}
+
+void
+zfs_remove_ntsecurity(struct vnode *vp)
+{
+	int error;
+	void *oldsd = vnode_security(vp);
+	vnode_setsecurity(vp, NULL);
+	if (oldsd)
+		ExFreePool(oldsd);
+
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return;
+
+	error = zpl_xattr_set(vp, EA_NTACL, NULL, 0, NULL);
+
+	if (error == 0) {
+		dprintf("%s: removed NTSecurity\n", __func__);
+	} else {
+		dprintf("%s: failed to remove NTSecurity: %d\n",
+		    __func__, error);
+	}
 }
 
 void
@@ -3135,7 +3184,7 @@ err:
 
 // return true if xattr is a stream (name ends with ":$DATA")
 int
-xattr_stream(char *name)
+xattr_stream(const char *name)
 {
 	char tail[] = ":$DATA";
 	int taillen = sizeof (tail);
