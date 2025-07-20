@@ -91,9 +91,12 @@ extern void zfs_send_notify(zfsvfs_t *zfsvfs, char *name, int,
     ULONG FilterMatch, ULONG Action);
 extern void zfs_send_notify_stream(zfsvfs_t *, char *, int, ULONG,
     ULONG, char *stream);
-extern int zfs_attach_security(struct vnode *vp, struct vnode *dvp);
+extern int zfs_attach_security(struct vnode *vp, struct vnode *dvp,
+    PACCESS_STATE);
 extern uint64_t zfs_sid2uid(SID *sid);
 extern uint64_t zfs_sid2gid(SID *sid);
+extern void find_set_gid(struct vnode *vp, struct vnode *dvp,
+    PSECURITY_SUBJECT_CONTEXT subjcont);
 
 BOOLEAN vattr_apply_lx_ea(vattr_t *vap, PFILE_FULL_EA_INFORMATION ea);
 NTSTATUS vnode_apply_eas(struct vnode *vp, zfs_ccb_t *,
@@ -183,9 +186,10 @@ extern ULONG get_reparse_tag(znode_t *zp);
 extern void acl_trivial_access_masks(mode_t mode, boolean_t isdir,
     trivial_acl_t *masks);
 extern void zfs_save_ntsecurity(struct vnode *vp);
-void zfs_load_ntsecurity(struct vnode *vp);
-NTSTATUS merge_security(vnode_t *vp, PACCESS_STATE as);
-struct vnode *zfs_parent(struct vnode *);
+extern void zfs_load_ntsecurity(struct vnode *vp);
+extern void zfs_remove_ntsecurity(struct vnode *vp);
+
+extern struct vnode *zfs_parent(struct vnode *);
 extern PVOID MapUserBuffer(IN OUT PIRP Irp);
 extern void mount_add_device(PDRIVER_OBJECT DriverObject,
     PDEVICE_OBJECT PhysicalDeviceObject);

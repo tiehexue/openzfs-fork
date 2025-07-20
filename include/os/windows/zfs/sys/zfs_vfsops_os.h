@@ -252,11 +252,6 @@ extern void zfs_sb_free(zfsvfs_t *zfsvfs);
 extern int zfs_check_global_label(const char *dsname, const char *hexsl);
 extern boolean_t zfs_is_readonly(zfsvfs_t *zfsvfs);
 
-
-
-
-extern int  zfs_vfs_init(struct vfsconf *vfsp);
-extern int  zfs_vfs_start(struct mount *mp, int flags, vfs_context_t context);
 extern int  zfs_vfs_mount(struct mount *mp, vnode_t *devvp,
     user_addr_t data, vfs_context_t context);
 extern int  zfs_vfs_unmount(struct mount *mp, int mntflags,

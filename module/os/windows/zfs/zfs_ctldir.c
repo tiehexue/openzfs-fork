@@ -269,7 +269,7 @@ zfsctl_vnode_alloc(zfsvfs_t *zfsvfs, uint64_t id,
 	if (id < zfsvfs->z_ctldir_startid)
 		zfsvfs->z_ctldir_startid = id;
 
-	zfs_attach_security(vp, parentvp);
+	zfs_attach_security(vp, parentvp, NULL);
 
 	mutex_enter(&zfsvfs->z_znodes_lock);
 	list_insert_tail(&zfsvfs->z_all_znodes, zp);

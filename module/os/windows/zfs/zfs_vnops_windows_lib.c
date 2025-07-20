@@ -163,6 +163,37 @@ static dacl def_dacls[] = {
 	{ 0, 0, NULL }
 };
 
+// ChatGPT version
+static dacl def_daclsY[] = {
+	// Allow Administrators full access
+	{ 0, FILE_ALL_ACCESS, &sid_BA },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_ALL_ACCESS, &sid_BA },
+
+	// Allow SYSTEM full access
+	{ 0, FILE_ALL_ACCESS, &sid_SY },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_ALL_ACCESS, &sid_SY },
+
+	// Allow Authenticated Users read/write/execute/delete
+	// (typical user permissions)
+	{ 0,
+	FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE |
+	DELETE | WRITE_DAC | WRITE_OWNER,
+	&sid_AU },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE |
+	DELETE | WRITE_DAC | WRITE_OWNER,
+	&sid_AU },
+
+	// Optional: Allow Built-in Users read-only
+	{ 0, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, &sid_BU },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, &sid_BU },
+
+	{ 0, 0, NULL } // Terminator
+};
+
 
 // #define	USE_RECYCLE_ACL
 #ifdef USE_RECYCLE_ACL
@@ -2543,6 +2574,31 @@ zfs_sid2uid(SID *sid)
 		return (sid->SubAuthority[1]);
 	}
 
+	// Example matcher for S-1-5-21-*-*-*-RID
+	if (sid->Revision == 1 &&
+	    sid->IdentifierAuthority.Value[5] == 5 &&
+	    sid->SubAuthorityCount >= 5 &&
+	    sid->SubAuthority[0] == 21) {
+
+		uid_t uid = sid->SubAuthority[sid->SubAuthorityCount - 1];
+		dprintf("%s: returning2 uid %llu\n", __func__,
+		    uid);
+		return (uid);
+	}
+
+	// Example matcher for S-1-5-22-*-*-*-RID
+	if (sid->Revision == 1 &&
+	    sid->IdentifierAuthority.Value[5] == 5 &&
+	    sid->SubAuthorityCount >= 5 &&
+	    sid->SubAuthority[0] == 22) {
+
+		uid_t uid = sid->SubAuthority[sid->SubAuthorityCount - 1];
+		dprintf("%s: returning3 uid %llu\n", __func__,
+		    uid);
+		return (uid);
+	}
+
+
 	dprintf("%s: returning uid UID_NOBODY\n", __func__);
 	return (UID_NOBODY);
 }
@@ -2601,6 +2657,18 @@ zfs_sid2gid(SID *sid)
 		dprintf("%s: returning gid %llu\n", __func__,
 		    sid->SubAuthority[1]);
 		return (sid->SubAuthority[1]);
+	}
+
+	// Example matcher for S-1-5-21-*-*-*-RID
+	if (sid->Revision == 1 &&
+	    sid->IdentifierAuthority.Value[5] == 5 &&
+	    sid->SubAuthorityCount >= 5 &&
+	    sid->SubAuthority[0] == 21) {
+
+		uid_t gid = sid->SubAuthority[sid->SubAuthorityCount - 1];
+		dprintf("%s: returning2 gid %llu\n", __func__,
+		    gid);
+		return (gid);
 	}
 
 	dprintf("%s: returning gid GID_NOBODY\n", __func__);
@@ -2666,9 +2734,9 @@ find_set_gid(struct vnode *vp, struct vnode *dvp,
     PSECURITY_SUBJECT_CONTEXT subjcont)
 {
 	NTSTATUS Status;
-	// TOKEN_OWNER *to = NULL;
+	TOKEN_OWNER *to = NULL;
 	TOKEN_PRIMARY_GROUP *tpg = NULL;
-	// TOKEN_GROUPS *tg = NULL;
+	TOKEN_GROUPS *tg = NULL;
 	znode_t *zp = VTOZ(vp);
 
 	if (dvp && zp) {
@@ -2687,24 +2755,30 @@ find_set_gid(struct vnode *vp, struct vnode *dvp,
 	if (!NT_SUCCESS(Status)) {
 		dprintf("SeQueryInformationToken returned %08lx\n", Status);
 	} else {
-		if (zp)
-			zp->z_gid = zfs_sid2gid(to->Owner);
+		if (zp) {
+			zp->z_uid = zfs_sid2uid(to->Owner);
+			dprintf("Using uid %lu\n", zp->z_uid);
+			dump_sid(to->Owner);
+		}
 		ExFreePool(to);
 	}
 #endif
 
 	// If we one day implement a gid_mapping_list
-
+#if 0
 	Status = SeQueryInformationToken(subjcont->PrimaryToken,
 	    TokenPrimaryGroup, (void**)&tpg);
 	if (!NT_SUCCESS(Status) || !tpg) {
 		dprintf("SeQueryInformationToken returned %08lx\n", Status);
 	} else {
-		if (zp)
+		if (zp) {
 			zp->z_gid = zfs_sid2gid(tpg->PrimaryGroup);
+			dprintf("Using gid %lu\n", zp->z_gid);
+			dump_sid(tpg->PrimaryGroup);
+		}
 		ExFreePool(tpg);
 	}
-
+#endif
 #if 0
 	Status = SeQueryInformationToken(subjcont->PrimaryToken,
 	    TokenGroups, (void**)&tg);
@@ -2766,8 +2840,11 @@ zfs_load_ntsecurity(struct vnode *vp)
 	if (error || retsize <= 0)
 		return;
 
-	if (vnode_security(vp) != NULL)
-		ExFreePool(vnode_security(vp));
+
+	void *oldsd = vnode_security(vp);
+	vnode_setsecurity(vp, NULL);
+	if (oldsd)
+		ExFreePool(oldsd);
 
 	void *sd = ExAllocatePoolWithTag(PagedPool, retsize, 'ZSEC');
 	if (sd == NULL)
@@ -2845,8 +2922,11 @@ err:
 		zfs_freesid(groupsid);
 }
 
+// Attach security based on parent SD, or
+// optionally, passed in SD.
 int
-zfs_attach_security(struct vnode *vp, struct vnode *dvp)
+zfs_attach_security(struct vnode *vp, struct vnode *dvp,
+    PACCESS_STATE access_state)
 {
 	SECURITY_SUBJECT_CONTEXT subjcont;
 	NTSTATUS Status = STATUS_INVALID_PARAMETER;
@@ -2882,12 +2962,9 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp)
 	// If no parent, find it. This will take one hold on
 	// dvp, either directly or from zget().
 	znode_t *dzp = NULL;
-	if (dvp == NULL) {
-		dvp = vnode_parent(vp);
-		if (dvp == NULL)
-			goto err;
-	}
-	if (VN_HOLD(dvp) != 0)
+
+	dvp = zfs_parent(vp);
+	if (dvp == NULL)
 		goto err;
 	dzp = VTOZ(dvp);
 
@@ -2901,14 +2978,17 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp)
 
 	SeCaptureSubjectContext(&subjcont);
 	void *sd = NULL;
-	Status = SeAssignSecurityEx(vnode_security(dvp), NULL, (void**)&sd,
+	Status = SeAssignSecurityEx(vnode_security(dvp),
+	    access_state ? access_state->SecurityDescriptor : NULL,
+	    (void**)&sd,
 	    NULL, vnode_isdir(vp)?TRUE:FALSE, SEF_DACL_AUTO_INHERIT,
 	    &subjcont, IoGetFileObjectGenericMapping(), PagedPool);
 
 	if (Status != STATUS_SUCCESS)
 		goto err;
 
-	Status = RtlGetOwnerSecurityDescriptor(vnode_security(dvp),
+	// what OwnerID did we get?
+	Status = RtlGetOwnerSecurityDescriptor(sd,
 	    &usersid, &defaulted);
 	if (!NT_SUCCESS(Status)) {
 		dprintf("RtlGetOwnerSecurityDescriptor returned %08lx\n",
@@ -2917,9 +2997,25 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp)
 		zp->z_uid = zfs_sid2uid(usersid);
 	}
 
+	// what GroupID did we get?
+	Status = RtlGetGroupSecurityDescriptor(sd,
+	    &groupsid, &defaulted);
+	if (!NT_SUCCESS(Status)) {
+		dprintf("RtlGetGroupSecurityDescriptor returned %08lx\n",
+		    Status);
+	} else {
+		zp->z_gid = zfs_sid2gid(groupsid);
+	}
+
 	find_set_gid(vp, dvp, &subjcont);
 	dprintf("%s: set uid %llu gid %llu\n", __func__,
 	    zp->z_uid, zp->z_gid);
+#if 0
+	if (usersid)
+		dump_sid(usersid);
+	if (groupsid)
+		dump_sid(groupsid);
+#endif
 
 	/* Why do we do this rel -> abs -> rel ? */
 	ULONG buflen;
@@ -2961,23 +3057,30 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp)
 		dprintf("RtlSelfRelativeToAbsoluteSD returned %08lx\n", Status);
 		goto err;
 	}
+	boolean_t allocated_usersid = B_FALSE;
+	boolean_t allocated_groupsid = B_FALSE;
 
-	zfs_uid2sid(zp->z_uid, &usersid);
-	if (!usersid) {
-		dprintf("uid_to_sid returned %08lx\n", Status);
-		Status = STATUS_NO_MEMORY;
-		goto err;
+	// Only convert over uid if SD does not contain OwnerID
+	if (usersid == NULL) {
+		zfs_uid2sid(zp->z_uid, &usersid);
+		if (!usersid) {
+			dprintf("uid_to_sid returned %08lx\n", Status);
+			Status = STATUS_NO_MEMORY;
+			goto err;
+		}
+		allocated_usersid = B_TRUE;
 	}
-
 	RtlSetOwnerSecurityDescriptor(abssd, usersid, FALSE);
 
-	zfs_gid2sid(zp->z_gid, &groupsid);
-	if (!groupsid) {
-		dprintf("out of memory\n");
-		Status = STATUS_NO_MEMORY;
-		goto err;
+	if (groupsid == NULL) {
+		zfs_gid2sid(zp->z_gid, &groupsid);
+		if (!groupsid) {
+			dprintf("out of memory\n");
+			Status = STATUS_NO_MEMORY;
+			goto err;
+		}
+		allocated_groupsid = B_TRUE;
 	}
-
 	RtlSetGroupSecurityDescriptor(abssd, groupsid, FALSE);
 
 	buflen = 0;
@@ -3023,9 +3126,9 @@ err:
 
 	if (buf != NULL)
 		ExFreePool(buf);
-	if (usersid != NULL)
+	if (allocated_usersid)
 		zfs_freesid(usersid);
-	if (groupsid != NULL)
+	if (allocated_groupsid)
 		zfs_freesid(groupsid);
 	return (Status);
 }
