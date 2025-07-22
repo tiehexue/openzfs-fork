@@ -121,9 +121,6 @@ int zfs_flags = 0;
 // #error "This file should be compiled with MSVC not Clang"
 #endif
 
-#define	dprintf(...) \
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
-
 PDRIVER_OBJECT Storport_DriverObject = NULL;
 static PDRIVER_OBJECT OpenZVOL_DriverObject = NULL;
 static PDRIVER_OBJECT StopUnload_DriverObject = NULL;
@@ -133,6 +130,8 @@ boolean_t Storport_Unloaded = FALSE;
 
 extern int zvol_start(PDRIVER_OBJECT DriverObject,
     PUNICODE_STRING pRegistryPath);
+extern int initDbgCircularBuffer(void);
+extern int finiDbgCircularBuffer(void);
 
 int (*pzvol_os_read_zv)(zvol_state_t *zv, zfs_uio_t *uio,
     int flags) = NULL;
@@ -156,11 +155,6 @@ NTSTATUS NTAPI IoCreateDriver(
 wchar_t zfs_vdev_protection_filter[ZFS_MODULE_STRMAX] = { L"\0" };
 _Atomic uint64_t spl_lowest_vdev_disk_stack_remaining = 0;
 _Atomic uint64_t spl_lowest_zvol_stack_remaining = 0;
-
-void
-printBuffer(const char *fmt, ...)
-{
-}
 
 void
 spl_set_arc_no_grow(int i)
@@ -360,6 +354,8 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 	if (OpenZVOL_DriverObject)
 		IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
 	OpenZVOL_DriverObject = NULL;
+
+	finiDbgCircularBuffer();
 }
 
 NTSTATUS
@@ -478,6 +474,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	    "OpenZVOL: DriverEntry\n"));
 
 	Storport_DriverObject = DriverObject;
+
+	initDbgCircularBuffer();
 
 	// Init storport
 	zvol_start(DriverObject, pRegistryPath);

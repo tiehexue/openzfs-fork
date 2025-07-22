@@ -6,7 +6,7 @@ wdk_add_driver(OpenZVOL
   zfs_windows_zvol_scsi.c
   zfs_windows_zvol_wmi.c
   ../../../avl/avl.c
-
+  ../debug.c
   # OpenZFS_perf.rc
   # resource.rc
 )
