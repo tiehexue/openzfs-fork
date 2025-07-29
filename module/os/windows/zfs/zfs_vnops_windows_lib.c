@@ -2370,6 +2370,17 @@ failed:
  * just set the stream name.
  * Using FileTest on NTFS file:Zone.Identifier:$DATA returns the
  * name "/src/openzfs/zpool.exe:Zone.Identifier"
+ *
+ * Re-confirmed yet again with NTFS, opening
+ * "\README.md:Zone.Identifier:$DATA"
+ *
+ * FILE_NAME_INFORMATION: "\README.md:Zone.Identifier"
+ * FILE_STREAM_INFORMATION: "::$DATA" and ":Zone.Identifier:$DATA"
+ *
+ * So FULL path for file_name, with no tail DATA. And even though we
+ * opened ":Zone.Identifier", FILE_STREAM_INFORMATION shows all streams
+ * as if we opened the parent file.
+ *
  */
 int
 zfs_build_path_stream(znode_t *start_zp, znode_t *start_parent, char **fullpath,
@@ -2383,25 +2394,36 @@ zfs_build_path_stream(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 	error = zfs_build_path(start_zp, start_parent, fullpath,
 	    returnsize, start_zp_offset);
 
-	if (error && stream) {
+	if (!error && stream) {
 		// name + ":" + streamname + null
 		// TODO: clean this up to not realloc
-		char *newname;
-		newname = kmem_asprintf("%s:%s",
-		    *fullpath ? *fullpath : "", stream);
+		// make sure it isn't already the correct name
+		if (!*fullpath || strcmp(*fullpath, stream) != 0) {
+			char *newname;
+			newname = kmem_asprintf("%s:%s",
+			    *fullpath ? *fullpath : "", stream);
 
-		// Fetch new offset, before ":stream"
-		*start_zp_offset = *returnsize;
-		// free previous full name
-		kmem_free(*fullpath, *returnsize);
-		// assign new size
-		*returnsize = strlen(newname) + 1;
-		// assign new string
-		*fullpath = newname;
+			// Fetch new offset, before ":stream"
+			*start_zp_offset = *returnsize;
+			// free previous full name
+			kmem_free(*fullpath, *returnsize);
+			// assign new size
+			*returnsize = strlen(newname) + 1;
+			// assign new string
+			*fullpath = newname;
+		}
 	} else if (error) {
 		*fullpath = kmem_asprintf("(nameunknown)");
 		*returnsize = strlen(*fullpath) + 1;
 		*start_zp_offset = 0;
+	}
+
+	// If it ends with ":$DATA", truncate.
+	if (returnsize && *returnsize >= 7) {
+		if (strcmp(&((*fullpath)[(*returnsize) - 7]), ":$DATA") == 0) {
+			// dont change returnsize, used to free.
+			((*fullpath)[(*returnsize) - 7]) = 0;
+		}
 	}
 
 	return (0);

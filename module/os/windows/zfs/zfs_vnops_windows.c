@@ -369,6 +369,9 @@ zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *fileobject,
     char *stream)
 {
 	zfs_ccb_t *zccb;
+	znode_t *zp = NULL;
+	if (VTOZ(vp) != NULL)
+		zp = VTOZ(vp);
 
 	if (fileobject->FsContext2 == NULL) {
 		zccb = kmem_zalloc(sizeof (zfs_ccb_t), KM_SLEEP);
@@ -393,8 +396,7 @@ zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *fileobject,
 
 	uint64_t s = 0ULL;
 	uint64_t a = 0ULL;
-	if (VTOZ(vp) != NULL) {
-		znode_t *zp = VTOZ(vp);
+	if (zp != NULL) {
 		s = zp->z_size;
 		a = P2ROUNDUP(zp->z_size, zp->z_blksz);
 	}
@@ -407,11 +409,32 @@ zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *fileobject,
 	vp->FileHeader.IsFastIoPossible = fast_io_possible(vp);
 #endif
 
-	zfs_build_path_stream(VTOZ(vp), dvp ? VTOZ(dvp) : NULL,
-	    &zccb->z_name_cache,
-	    &zccb->z_name_len,
-	    &zccb->z_name_offset,
-	    stream);
+	// When xattr, fetch grandparent instead, the owner of the
+	// xattr dir.
+	if (zp != NULL && dvp != NULL &&
+	    (zp->z_pflags & ZFS_XATTR)) {
+		znode_t *dzp;
+
+		zccb->real_file_id = VTOZ(dvp)->z_xattr_parent;
+
+		int error = zfs_zget(zp->z_zfsvfs, zccb->real_file_id, &dzp);
+		if (!error) {
+			// Build from gparent, ie the filename,
+			// after it appends stream name.
+			zfs_build_path_stream(dzp, NULL,
+			    &zccb->z_name_cache,
+			    &zccb->z_name_len,
+			    &zccb->z_name_offset, stream);
+			zrele(dzp);
+		}
+	} else {
+
+		zfs_build_path_stream(VTOZ(vp), dvp ? VTOZ(dvp) : NULL,
+		    &zccb->z_name_cache,
+		    &zccb->z_name_len,
+		    &zccb->z_name_offset,
+		    stream);
+	}
 
 	// Debug, remember what Vpb we returned
 	mount_t *zmo = vnode_mount(vp);
@@ -769,36 +792,6 @@ zfs_security_context_post(vnode_t *vp, vnode_t *dvp,
 		zfs_remove_ntsecurity(vp);
 		zfs_attach_security(vp, dvp,
 		    SecurityContext->AccessState);
-	}
-}
-
-
-void
-check_and_set_stream_parent(char *stream_name, PFILE_OBJECT FileObject,
-    uint64_t id)
-{
-	if (stream_name != NULL && FileObject != NULL &&
-	    FileObject->FsContext2 != NULL) {
-		zfs_ccb_t *zccb = FileObject->FsContext2;
-
-		zccb->real_file_id = id;
-
-		if (FileObject->FsContext != NULL) {
-			struct vnode *vp = FileObject->FsContext;
-			znode_t *dzp;
-			znode_t *zp = VTOZ(vp);
-			if (zp != NULL && zp->z_zfsvfs != NULL) {
-				// Fetch gparent (one above xattr dir)
-				int error = zfs_zget(zp->z_zfsvfs, id, &dzp);
-				if (!error) {
-					zfs_build_path_stream(zp, dzp,
-					    &zccb->z_name_cache,
-					    &zccb->z_name_len,
-					    &zccb->z_name_offset, stream_name);
-					zrele(dzp);
-				}
-			}
-		}
 	}
 }
 
@@ -2056,9 +2049,6 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 					    FILE_NOTIFY_CHANGE_FILE_NAME,
 					    FILE_ACTION_ADDED);
 				} else {
-					check_and_set_stream_parent(stream_name,
-					    FileObject,
-					    VTOZ(dvp)->z_xattr_parent);
 
 					zfs_send_notify_stream(zfsvfs, // WOOT
 					    zccb->z_name_cache,
