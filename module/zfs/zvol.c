@@ -921,7 +921,7 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 
 		itx->itx_private = zv;
 
-		(void) zil_itx_assign(zilog, itx, tx);
+		zil_itx_assign(zilog, itx, tx);
 
 		offset += len;
 		size -= len;
@@ -1126,7 +1126,7 @@ zvol_shutdown_zv(zvol_state_t *zv)
 	 */
 	if (zv->zv_flags & ZVOL_WRITTEN_TO)
 		txg_wait_synced(dmu_objset_pool(zv->zv_objset), 0);
-	(void) dmu_objset_evict_dbufs(zv->zv_objset);
+	dmu_objset_evict_dbufs(zv->zv_objset);
 }
 
 /*
