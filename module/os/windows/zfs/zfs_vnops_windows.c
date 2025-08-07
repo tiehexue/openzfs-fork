@@ -2751,7 +2751,12 @@ query_volume_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 #endif
 #if defined(FILE_SUPPORTS_BLOCK_REFCOUNTING)
 		/* Block-cloning, from FSCTL_DUPLICATE_EXTENTS */
-		ffai->FileSystemAttributes |= FILE_SUPPORTS_BLOCK_REFCOUNTING;
+		if (zfsvfs->z_os && zfsvfs->z_os->os_spa &&
+		    spa_feature_is_active(dmu_objset_spa(zfsvfs->z_os),
+		    SPA_FEATURE_BLOCK_CLONING)) {
+			ffai->FileSystemAttributes |=
+			    FILE_SUPPORTS_BLOCK_REFCOUNTING;
+		}
 #endif
 
 		ffai->FileSystemAttributes |= FILE_FILE_COMPRESSION |
