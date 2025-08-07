@@ -60,8 +60,6 @@
 #include <sys/openzvol.h>
 #include <sys/driver_extension.h>
 
-#define	dprintf(...) \
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
 extern PDRIVER_OBJECT Storport_DriverObject;
 
 /*
@@ -294,6 +292,7 @@ ScsiExecuteMain(
 	TraceEvent(TRACE_VERBOSE, "%s:%d: ScsiExecute: pSrb = 0x%p, CDB = 0x%x"
 	    " Path: %x TID: %x Lun: %x\n", __func__, __LINE__, pSrb,
 	    pSrb->Cdb[0], pSrb->PathId, pSrb->TargetId, pSrb->Lun);
+
 	*pResult = ResultDone;
 
 	// Verify that the B/T/L is not out of bound.
@@ -362,115 +361,8 @@ ScsiExecuteMain(
 	} // switch (pSrb->Cdb[0])
 
 Done:
+
 	return (status);
-}
-
-pHW_LU_EXTENSION_MPIO
-ScsiGetMPIOExt(
-	__in pHW_HBA_EXT pHBAExt,
-	__in pHW_LU_EXTENSION pLUExt,
-	__in PSCSI_REQUEST_BLOCK pSrb)
-{
-	pHW_LU_EXTENSION_MPIO pLUMPIOExt = NULL;
-#if defined(_AMD64_)
-	KLOCK_QUEUE_HANDLE LockHandle,
-	    LockHandle2;
-#else
-	KIRQL SaveIrql,
-	    SaveIrql2;
-#endif
-	PLIST_ENTRY pNextEntry;
-
-#if defined(_AMD64_)
-	KeAcquireInStackQueuedSpinLock(&pHBAExt->pwzvolDrvObj->MPIOExtLock,
-	    &LockHandle);
-#else
-	KeAcquireSpinLock(&pHBAExt->pwzvolDrvObj->MPIOExtLock, &SaveIrql);
-#endif
-
-	for (pNextEntry = pHBAExt->pwzvolDrvObj->ListMPIOExt.Flink;
-	    pNextEntry != &pHBAExt->pwzvolDrvObj->ListMPIOExt;
-	    pNextEntry = pNextEntry->Flink) {
-		pLUMPIOExt = CONTAINING_RECORD(pNextEntry,
-		    HW_LU_EXTENSION_MPIO, List);
-
-		if (pSrb->PathId == pLUMPIOExt->ScsiAddr.PathId &&
-		    pSrb->TargetId == pLUMPIOExt->ScsiAddr.TargetId &&
-		    pSrb->Lun == pLUMPIOExt->ScsiAddr.Lun) {
-			break;
-		}
-	}
-
-	if (pNextEntry == &pHBAExt->pwzvolDrvObj->ListMPIOExt) {
-		pLUMPIOExt = ExAllocatePoolWithTag(NonPagedPoolNx,
-		    sizeof (HW_LU_EXTENSION_MPIO), MP_TAG_GENERAL);
-
-		if (!pLUMPIOExt) {
-			dprintf("Failed to allocate HW_LU_EXTENSION_MPIO\n");
-			goto Done;
-		}
-
-		RtlZeroMemory(pLUMPIOExt, sizeof (HW_LU_EXTENSION_MPIO));
-
-		pLUMPIOExt->ScsiAddr.PathId = pSrb->PathId;
-		pLUMPIOExt->ScsiAddr.TargetId = pSrb->TargetId;
-		pLUMPIOExt->ScsiAddr.Lun = pSrb->Lun;
-
-		KeInitializeSpinLock(&pLUMPIOExt->LUExtMPIOLock);
-
-		InitializeListHead(&pLUMPIOExt->LUExtList);
-
-		// ScsiAllocDiskBuf(pHBAExt,
-		// &pLUMPIOExt->pDiskBuf, &pLUExt->MaxBlocks);
-
-		if (!pLUMPIOExt->pDiskBuf) {
-			dprintf("Failed to allocate DiskBuf\n");
-			ExFreePoolWithTag(pLUMPIOExt, MP_TAG_GENERAL);
-			pLUMPIOExt = NULL;
-
-			goto Done;
-		}
-
-		InsertTailList(&pHBAExt->pwzvolDrvObj->ListMPIOExt,
-		    &pLUMPIOExt->List);
-
-		pHBAExt->pwzvolDrvObj->DrvInfoNbrMPIOExtObj++;
-	} else {
-		pLUExt->MaxBlocks =
-		    (USHORT)(pHBAExt->pwzvolDrvObj->
-		    wzvolRegInfo.PhysicalDiskSize / MP_BLOCK_SIZE);
-	}
-
-Done:
-	if (pLUMPIOExt) {
-
-#if defined(_AMD64_)
-		KeAcquireInStackQueuedSpinLock(&pLUMPIOExt->LUExtMPIOLock,
-		    &LockHandle2);
-#else
-		KeAcquireSpinLock(&pLUMPIOExt->LUExtMPIOLock, &SaveIrql2);
-#endif
-
-		pLUExt->pLUMPIOExt = pLUMPIOExt;
-		pLUExt->pDiskBuf = pLUMPIOExt->pDiskBuf;
-
-		InsertTailList(&pLUMPIOExt->LUExtList, &pLUExt->MPIOList);
-		pLUMPIOExt->NbrRealLUNs++;
-
-#if defined(_AMD64_)
-		KeReleaseInStackQueuedSpinLock(&LockHandle2);
-#else
-		KeReleaseSpinLock(&pLUMPIOExt->LUExtMPIOLock, SaveIrql2);
-#endif
-	}
-
-#if defined(_AMD64_)
-	KeReleaseInStackQueuedSpinLock(&LockHandle);
-#else
-	KeReleaseSpinLock(&pHBAExt->pwzvolDrvObj->MPIOExtLock, SaveIrql);
-#endif
-
-	return (pLUMPIOExt);
 }
 
 UCHAR

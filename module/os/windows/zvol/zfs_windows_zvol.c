@@ -31,14 +31,11 @@
 #include <sys/zfs_context.h>
 #include <sys/wzvol.h>
 
-#define	dprintf(...) \
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, __VA_ARGS__))
-
 #include <sys/openzvol.h>
 
 extern boolean_t Storport_Unloaded;
 
-static pHW_HBA_EXT STOR_HBAExt = NULL;
+pHW_HBA_EXT STOR_HBAExt = NULL;
 static wzvolDriverInfo STOR_wzvolDriverInfo;
 
 static uint64_t windows_zvol_enabled = 1;
@@ -78,6 +75,7 @@ zvol_start(PDRIVER_OBJECT DriverObject, PUNICODE_STRING pRegistryPath)
 	NTSTATUS status;
 
 	// ListLoadedDrivers();
+	dprintf("%s:\n", __func__);
 
 	// if (windows_zvol_enabled == 0)
 	//	return (STATUS_FS_DRIVER_REQUIRED);
@@ -106,8 +104,6 @@ zvol_start(PDRIVER_OBJECT DriverObject, PUNICODE_STRING pRegistryPath)
 
 	pwzvolDrvInfo->wzvolRegInfo.NbrLUNsperHBA = DEFAULT_NbrLUNsperHBA;
 	pwzvolDrvInfo->wzvolRegInfo.NbrLUNsperTarget = DEFAULT_NbrLUNsperTarget;
-	pwzvolDrvInfo->wzvolRegInfo.bCombineVirtDisks =
-	    DEFAULT_bCombineVirtDisks;
 
 	RtlInitUnicodeString(&pwzvolDrvInfo->wzvolRegInfo.VendorId, VENDOR_ID);
 	RtlInitUnicodeString(&pwzvolDrvInfo->wzvolRegInfo.ProductId,
@@ -197,6 +193,8 @@ zvol_start(PDRIVER_OBJECT DriverObject, PUNICODE_STRING pRegistryPath)
 	    (PHW_INITIALIZATION_DATA)&hwInitData,
 	    NULL);
 
+	dprintf("%s: StorPortInitialize returned %x\n", __func__, status);
+
 	return (status);
 }
 
@@ -206,6 +204,7 @@ wzvol_HwInitialize(__in pHW_HBA_EXT pHBAExt)
 	UNREFERENCED_PARAMETER(pHBAExt);
 
 	dprintf("%s: entry\n", __func__);
+
 	return (TRUE);
 }
 
@@ -250,10 +249,8 @@ wzvol_HwFindAdapter(
 		STOR_HBAExt = pHBAExt; // So we can announce
 		pHBAExt->bDontReport = FALSE;
 	} else {
-		// If MPIO support is not requested we won't present
-		// the LUNs through other found adapters.
-		pHBAExt->bDontReport =
-		    !STOR_wzvolDriverInfo.wzvolRegInfo.bCombineVirtDisks;
+		// Sample does this, only first adapter announces
+		pHBAExt->bDontReport = TRUE;
 	}
 
 	/* Already initialised? Skip */
@@ -743,12 +740,12 @@ wzvol_HwStartIo(
 	NTSTATUS status;
 	UCHAR Result = ResultDone;
 
+	// dprintf("wzvol_HwStartIo: entry, Function = 0x%x\n", pSrb->Function);
 
 	_InterlockedExchangeAdd((volatile LONG *)&pHBAExt->SRBsSeen, 1);
 
 	// Next, if true, will cause StorPort to remove the associated LUNs
 	// if, for example, devmgmt.msc is asked "scan for hardware changes."
-
 
 	switch (pSrb->Function) {
 
@@ -900,16 +897,8 @@ wzvol_HwAdapterControl(
 void
 wzvol_StopAdapter(__in pHW_HBA_EXT pHBAExt)
 {
-	pHW_LU_EXTENSION pLUExt, pLUExt2;
-	PLIST_ENTRY pNextEntry, pNextEntry2;
-	pwzvolDriverInfo pwzvolDrvInfo = pHBAExt->pwzvolDrvObj;
-	pHW_LU_EXTENSION_MPIO pLUMPIOExt = NULL;
-
-#if defined(_AMD64_)
-	KLOCK_QUEUE_HANDLE LockHandle;
-#else
-	KIRQL SaveIrql;
-#endif
+	pHW_LU_EXTENSION pLUExt;
+	PLIST_ENTRY pNextEntry;
 
 	dprintf("%s: entry\n", __func__);
 
@@ -920,87 +909,9 @@ wzvol_StopAdapter(__in pHW_HBA_EXT pHBAExt)
 	    pNextEntry = pNextEntry->Flink) {
 		pLUExt = CONTAINING_RECORD(pNextEntry, HW_LU_EXTENSION, List);
 
-		if (pwzvolDrvInfo->wzvolRegInfo.bCombineVirtDisks) {
-			pLUMPIOExt = pLUExt->pLUMPIOExt;
-
-			if (!pLUMPIOExt) {
-				break;
-			}
-
-#if defined(_AMD64_)
-			KeAcquireInStackQueuedSpinLock(
-			    &pLUMPIOExt->LUExtMPIOLock,
-			    &LockHandle);
-#else
-			KeAcquireSpinLock(&pLUMPIOExt->LUExtMPIOLock,
-			    &SaveIrql);
-#endif
-
-			for (pNextEntry2 = pLUMPIOExt->LUExtList.Flink;
-			    pNextEntry2 != &pLUMPIOExt->LUExtList;
-			    pNextEntry2 = pNextEntry2->Flink) {
-				pLUExt2 = CONTAINING_RECORD(pNextEntry2,
-				    HW_LU_EXTENSION, MPIOList);
-
-				if (pLUExt2 == pLUExt) {
-					break;
-				}
-			}
-
-			if (pNextEntry2 != &pLUMPIOExt->LUExtList) {
-				RemoveEntryList(pNextEntry2);
-
-				pLUMPIOExt->NbrRealLUNs--;
-
-				if (0 == pLUMPIOExt->NbrRealLUNs) {
-					ExFreePool(pLUExt->pDiskBuf);
-				}
-			}
-
-#if defined(_AMD64_)
-			KeReleaseInStackQueuedSpinLock(&LockHandle);
-#else
-			KeReleaseSpinLock(&pLUMPIOExt->LUExtMPIOLock, SaveIrql);
-#endif
-		} else {
-			ExFreePool(pLUExt->pDiskBuf);
-		}
+		ExFreePool(pLUExt->pDiskBuf);
 	}
 
-	// Clean up the linked list of MPIO collector objects, if needed.
-
-	if (pwzvolDrvInfo->wzvolRegInfo.bCombineVirtDisks) {
-#if defined(_AMD64_)
-		KeAcquireInStackQueuedSpinLock(
-		    &pwzvolDrvInfo->MPIOExtLock, &LockHandle);
-#else
-		KeAcquireSpinLock(&pwzvolDrvInfo->MPIOExtLock, &SaveIrql);
-#endif
-
-		for (pNextEntry = pwzvolDrvInfo->ListMPIOExt.Flink;
-		    pNextEntry != &pwzvolDrvInfo->ListMPIOExt;
-		    pNextEntry = pNextEntry2) {
-			pLUMPIOExt = CONTAINING_RECORD(pNextEntry,
-			    HW_LU_EXTENSION_MPIO, List);
-
-			if (!pLUMPIOExt) {
-				break;
-			}
-
-			pNextEntry2 = pNextEntry->Flink;
-
-			if (0 == pLUMPIOExt->NbrRealLUNs) {
-				RemoveEntryList(pNextEntry);
-				ExFreePoolWithTag(pLUMPIOExt, MP_TAG_GENERAL);
-			}
-		}
-
-#if defined(_AMD64_)
-		KeReleaseInStackQueuedSpinLock(&LockHandle);
-#else
-		KeReleaseSpinLock(&pwzvolDrvInfo->MPIOExtLock, SaveIrql);
-#endif
-	}
 }
 
 void
@@ -1014,7 +925,7 @@ wzvol_TracingInit(
 void
 wzvol_TracingCleanup(__in PVOID pArg1)
 {
-#if 1
+#if 0
 	dprintf("MPTracingCleanUp entered\n");
 
 	// WPP_CLEANUP(pArg1);
@@ -1152,6 +1063,7 @@ void
 wzvol_announce_buschange(void)
 {
 	dprintf("%s: \n", __func__);
-	if (STOR_HBAExt != NULL)
+	if (STOR_HBAExt != NULL) {
 		StorPortNotification(BusChangeDetected, STOR_HBAExt, 0);
+	}
 }

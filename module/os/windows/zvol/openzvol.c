@@ -93,6 +93,7 @@
 #include <sys/types.h>
 #include <sys/mod_os.h>
 #include <ntddk.h>
+
 // #include <ntddstor.h>
 #include <storport.h>
 #include <fltKernel.h>
@@ -124,7 +125,8 @@ int zfs_flags = 0;
 PDRIVER_OBJECT Storport_DriverObject = NULL;
 static PDRIVER_OBJECT OpenZVOL_DriverObject = NULL;
 static PDRIVER_OBJECT StopUnload_DriverObject = NULL;
-static PDEVICE_OBJECT StopUnload_AttachedObject = NULL;
+static HANDLE g_PinHandle = NULL;
+extern pHW_HBA_EXT STOR_HBAExt;
 
 boolean_t Storport_Unloaded = FALSE;
 
@@ -174,6 +176,81 @@ zfs_vnop_reclaim(void *vp)
 
 /* end of shoddy */
 
+// file-scope
+
+// Call at PASSIVE_LEVEL after your adapter is up (e.g. after HwInitialize)
+NTSTATUS
+PinMyAdapterWithPdoName(_In_ PVOID HwDeviceExtension)
+{
+	PDEVICE_OBJECT Fdo = NULL, Pdo = NULL, Ldo = NULL;
+
+	// NOTE: 1st = FDO, 2nd = PDO, 3rd = LDO
+	ULONG got = StorPortGetDeviceObjects(HwDeviceExtension, (PVOID)&Fdo,
+	    (PVOID)&Pdo, (PVOID)&Ldo);
+	if (got != 0 || Pdo == NULL)
+		return (STATUS_UNSUCCESSFUL);
+
+	// Query PDO name: "\Device\00xxxx"
+	ULONG need = 0;
+	NTSTATUS st = IoGetDeviceProperty(Pdo,
+	    DevicePropertyPhysicalDeviceObjectName,
+	    0, NULL, &need);
+
+	if (st != STATUS_BUFFER_TOO_SMALL || need < sizeof (WCHAR))
+		return (NT_ERROR(st) ? st : STATUS_UNSUCCESSFUL);
+
+	WCHAR *buf = ExAllocatePoolWithTag(PagedPool, need, 'lvOP');
+	if (!buf)
+		return (STATUS_INSUFFICIENT_RESOURCES);
+
+	st = IoGetDeviceProperty(Pdo,
+	    DevicePropertyPhysicalDeviceObjectName,
+	    need, buf, &need);
+
+	if (!NT_SUCCESS(st)) {
+		ExFreePoolWithTag(buf, 'lvOP');
+		return (st);
+	}
+
+	UNICODE_STRING pdoName;
+	RtlInitUnicodeString(&pdoName, buf);
+
+	OBJECT_ATTRIBUTES oa;
+	InitializeObjectAttributes(&oa, &pdoName,
+	    OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+	    NULL, NULL);
+
+	IO_STATUS_BLOCK iosb;
+	HANDLE h = NULL;
+	st = ZwCreateFile(&h,
+	    FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+	    &oa, &iosb, NULL,
+	    FILE_ATTRIBUTE_NORMAL,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	    FILE_OPEN,
+	    FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+	    NULL, 0);
+
+	ExFreePoolWithTag(buf, 'lvOP');
+
+	if (NT_SUCCESS(st)) {
+		// hold this to cause PNP_VetoOutstandingOpen
+		// which stops module unloading.
+		g_PinHandle = h;
+	}
+
+	return (st);
+}
+
+void
+UnpinMyAdapter(void)
+{
+	if (g_PinHandle) {
+		HANDLE h = g_PinHandle;
+		g_PinHandle = NULL;
+		ZwClose(h);
+	}
+}
 
 NTSTATUS
 ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -206,15 +283,11 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 			// Lock this driver until deregistered
 			ObReferenceObject(DeviceObject);
+			status = PinMyAdapterWithPdoName(STOR_HBAExt);
+			if (status)
+				dprintf("PinMyAdapterWithPdoName failed: %x\n",
+				    status);
 
-			if (StopUnload_DriverObject->DeviceObject &&
-			    Storport_DriverObject->DeviceObject)
-				StopUnload_AttachedObject =
-				    IoAttachDeviceToDeviceStack(
-				    StopUnload_DriverObject->DeviceObject,
-				    Storport_DriverObject->DeviceObject);
-			dprintf("IoAttachDeviceToDeviceStack said %p\n",
-			    StopUnload_AttachedObject);
 		}
 
 		status = STATUS_SUCCESS;
@@ -229,10 +302,7 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 			// Unlock this driver
 			ObDereferenceObject(DeviceObject);
-
-			if (StopUnload_AttachedObject)
-				IoDetachDevice(StopUnload_AttachedObject);
-			StopUnload_AttachedObject = NULL;
+			UnpinMyAdapter();
 
 			OpenZVOLUnloadRoutine(OpenZVOL_DriverObject);
 		}
@@ -414,9 +484,6 @@ StopUnload_Relay(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	// dprintf("%s: Major %d Minor %d\n",
 	//    __func__, irpStack->MajorFunction, irpStack->MinorFunction);
 
-	if (StopUnload_AttachedObject)
-		return (IoCallDriver(StopUnload_AttachedObject, Irp));
-
 	// The device is not attached, complete the IRP and return an error
 	Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
 	Irp->IoStatus.Information = 0;  // No data has been processed
@@ -477,6 +544,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
 	initDbgCircularBuffer();
 
+	dprintf("OpenZVOL: DriverEntry\n");
+
 	// Init storport
 	zvol_start(DriverObject, pRegistryPath);
 
@@ -484,10 +553,12 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	 * So I have had a difficult time trying to stop Storport from
 	 * Unloading so eagerly. Even when disks are in use and mounted,
 	 * it just unloads if asked. So we create this fake Device here
-	 * which we attach to Storport. This appears to make PnpMgr from
-	 * calling Unload. Then when we finally detach, Storport is free
-	 * to unload. Such a simple thing, so it is surprising that there
-	 * is no Microsoft way to prevent unloading.
+	 * which will open the PDO "\Devices\000091" (or similar name)
+	 * of storport created device.
+	 * This will consider the device busy, and will be vetod for
+	 * unload, before even asking storport to unload. We close the
+	 * open descriptor once OpenZFS has deregistered, and it can
+	 * unload.
 	 */
 	NTSTATUS status = IoCreateDriver(NULL,
 	    &StopUnloadDriver);
@@ -507,6 +578,7 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 		    status));
 	}
 
+	dprintf("OpenZVOL: DriverEntry completed.\n");
 	return (STATUS_SUCCESS);
 }
 

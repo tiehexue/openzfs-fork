@@ -45,6 +45,10 @@ extern int optind;
 // DevCon uses LoadLib() - but lets just static link
 #pragma comment(lib, "Newdev.lib")
 
+#include <setupapi.h>
+#pragma comment(lib, "setupapi.lib")
+
+
 }
 
 #include "zfsinstaller.h"
@@ -54,6 +58,8 @@ extern int optind;
 #define	_SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING 1
 #include <experimental\filesystem>
 namespace fs = std::experimental::filesystem;
+
+#include <devguid.h>
 
 #define	MAX_PATH_LEN 1024
 
@@ -413,7 +419,14 @@ main(int argc, char *argv[])
 		}
 
 		if (argc == 4) {
+#if 1
+			printf("[1/4] Cleaning up extra installs of OpenZFS and OpenZVOL\n");
+			clean_extra_installs();
+			CleanupOpenZFSDriverPackages();
+			printf("[4/4] Completed.\n");
+
 			zfs_install(argv[2]);
+#endif
 			zvol_install(argv[3]);
 			if (zed_service)
 				install_zed();
@@ -598,6 +611,171 @@ installRootDevice(char *inf, bool IsServiceRunning, const char *rootdev)
 	return (failcode);
 }
 
+static DWORD
+Utf8ToWide(std::wstring &out, const char *in)
+{
+	int n = MultiByteToWideChar(CP_UTF8, 0, in, -1, nullptr, 0);
+	if (n <= 0)
+		return (GetLastError());
+	out.assign(n - 1, L'\0');
+	MultiByteToWideChar(CP_UTF8, 0, in, -1, &out[0], n);
+	return (ERROR_SUCCESS);
+}
+
+static DWORD
+StageInfAndGetPublishedPath(const wchar_t *srcInfPath,
+	std::wstring &publishedFullPath)
+{
+	wchar_t dest[MAX_PATH] = {};
+	DWORD   destChars = _countof(dest);  // <-- value, not pointer
+	DWORD   required = 0;
+
+	BOOL ok = SetupCopyOEMInfW(srcInfPath,
+		nullptr,          // OEMSourceMediaLocation
+		SPOST_PATH,       // srcInfPath is a filesystem path
+		0,                // CopyStyle
+		dest,
+		destChars,        // <-- size by value
+		&required,        // <-- pointer for “needed”
+		nullptr);         // we don't need the component
+
+	if (!ok) {
+		DWORD err = GetLastError();
+		if (err == ERROR_INSUFFICIENT_BUFFER && required > 0) {
+			std::wstring big(required, L'\0');     // room for required chars
+			ok = SetupCopyOEMInfW(srcInfPath, nullptr, SPOST_PATH, 0,
+				(wchar_t *) big.data(), required, &required, nullptr);
+			if (!ok) return GetLastError();
+			big.resize(wcslen(big.c_str()));
+			publishedFullPath = std::move(big);    // full path to oemXX.inf
+			return (ERROR_SUCCESS);
+		}
+		return (err);
+	}
+
+	// Success path with fixed buffer
+	publishedFullPath.assign(dest);                // full path to oemXX.inf
+	return (ERROR_SUCCESS);
+}
+
+DWORD
+installZVOLDevice(const char *infPathUtf8, BOOL /*ignored*/, const char * /*unused*/)
+{
+	// --- 0) Convert INF path and stage the package to get the published oemXX.inf ---
+	std::wstring infW;
+	if (DWORD e = Utf8ToWide(infW, infPathUtf8))
+		return (e);
+
+	WCHAR oemInf[MAX_PATH] = {};
+	if (!SetupCopyOEMInfW(infW.c_str(),
+		nullptr,        // source root
+		SPOST_NONE,
+		0,              // copy style
+		oemInf,
+		ARRAYSIZE(oemInf),
+		nullptr,
+		nullptr)) {
+		DWORD e = GetLastError();
+		fprintf(stderr, "SetupCopyOEMInfW failed: %lx\n", e);
+		return (e);
+	}
+
+	// --- 1) Read the class from the staged INF (don’t hardcode) ---
+	GUID infClassGuid{};
+	WCHAR infClassName[64];
+	if (!SetupDiGetINFClassW(oemInf, &infClassGuid, infClassName, ARRAYSIZE(infClassName), nullptr)) {
+		DWORD e = GetLastError();
+		fprintf(stderr, "SetupDiGetINFClassW failed: %lx\n", e);
+		return (e);
+	}
+
+	// --- 2) Create a device info list in that class ---
+	HDEVINFO hdi = SetupDiCreateDeviceInfoList(&infClassGuid, nullptr);
+	if (hdi == INVALID_HANDLE_VALUE) {
+		DWORD e = GetLastError();
+		fprintf(stderr, "SetupDiCreateDeviceInfoList failed: %lx\n", e);
+		return (e);
+	}
+
+	SP_DEVINFO_DATA dev{};
+	dev.cbSize = sizeof (dev);
+
+	// Create a root-enumerated devnode; Windows will generate \0000
+	if (!SetupDiCreateDeviceInfoW(hdi,
+		L"OpenZVOL",         // base name (NOT a devinst id)
+		&infClassGuid,
+		L"OpenZVOL",
+		nullptr,
+		DICD_GENERATE_ID,
+		&dev)) {
+		DWORD e = GetLastError();
+		fprintf(stderr, "SetupDiCreateDeviceInfoW failed: %lx\n", e);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return (e);
+	}
+
+	// --- 3) Set HWIDs (MULTI_SZ) and friendly name ---
+	wchar_t hwids[] = L"ROOT\\OpenZVOL\0\0";
+	if (!SetupDiSetDeviceRegistryPropertyW(hdi, &dev, SPDRP_HARDWAREID,
+		reinterpret_cast<const BYTE *>(hwids),
+		sizeof (hwids)))
+	{
+		DWORD e = GetLastError();
+		fprintf(stderr, "Set HARDWAREID failed: %lx\n", e);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return (e);
+	}
+
+	(void)SetupDiSetDeviceRegistryPropertyW(hdi, &dev, SPDRP_FRIENDLYNAME,
+		reinterpret_cast<const BYTE *>(L"OpenZVOL"),
+		DWORD((wcslen(L"OpenZVOL") + 1) * sizeof (WCHAR)));
+
+	// --- 4) Register so the devnode becomes present (creates Enum\ROOT\OPENZVOL\0000) ---
+	if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, hdi, &dev)) {
+		DWORD e = GetLastError();
+		fprintf(stderr, "DIF_REGISTERDEVICE failed: %lx\n", e);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return (e);
+	}
+
+	// (Optional) show the actual instance id
+	WCHAR instId[256];
+	if (SetupDiGetDeviceInstanceIdW(hdi, &dev, instId, ARRAYSIZE(instId), nullptr)) {
+		fwprintf(stderr, L"OpenZVOL devinst: %s\n", instId);
+	}
+
+	// --- 5) Bind the driver from *this* INF using UpdateDriverForPlugAndPlayDevicesW ---
+	// This avoids SelectBestCompatDrv pitfalls (wrong list kind, class/HWID mismatch, etc.)
+	BOOL reboot = FALSE;
+	if (!UpdateDriverForPlugAndPlayDevicesW(nullptr,
+		L"ROOT\\OpenZVOL",
+		oemInf,                  // published oemXX.inf
+		INSTALLFLAG_FORCE /*| INSTALLFLAG_NONINTERACTIVE*/,
+		&reboot)) {
+		DWORD e = GetLastError();
+		fprintf(stderr, "UpdateDriverForPlugAndPlayDevicesW failed: %lx\n", e);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return (e);
+	}
+
+	// --- 6) Start the devnode now (PnP would usually do this anyway) ---
+	SP_PROPCHANGE_PARAMS pcp{};
+	pcp.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+	pcp.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+	pcp.StateChange = DICS_START;
+	pcp.Scope = DICS_FLAG_GLOBAL;
+	pcp.HwProfile = 0;
+
+	if (SetupDiSetClassInstallParamsW(hdi, &dev,
+		reinterpret_cast<SP_CLASSINSTALL_HEADER *>(&pcp), sizeof (pcp))) {
+		(void)SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, hdi, &dev);
+	}
+
+	SetupDiDestroyDeviceInfoList(hdi);
+	fprintf(stderr, "installZVOLDevice completed successfully\n");
+	return (ERROR_SUCCESS);
+}
+
 DWORD
 uninstallRootDevice(char *inf, const char *rootdev)
 {
@@ -754,30 +932,16 @@ zvol_install(char *inf_path)
 	}
 
 #ifdef _DEBUG
-	fprintf(stderr, "Checking if OpenZVOLservice is already running...\n");
+	fprintf(stderr, "Checking if OpenZVOL.Service is already running..\n");
 	system("sc query OpenZVOL");
 	fprintf(stderr, "\n\n");
 #endif
-	error = executeInfSection("OpenZVOL_Install 128 ", inf_path);
-
-	// Start driver service if not already running
-	char serviceName[] = "OpenZVOL";
-	if (!error)
-		error = startService(serviceName);
-	else
-		fprintf(stderr, "Installation failed, skip "
-			"starting the service\r\n");
-
-	if (error == ERROR_SERVICE_ALREADY_RUNNING) {
-		IsServiceRunning = true;
-		error = 0;
-	}
 
 	if (!error)
-		error = installRootDevice(inf_path, IsServiceRunning, ZVOL_ROOTDEV);
+		error = installZVOLDevice(inf_path, IsServiceRunning, ZVOL_ROOTDEV);
 
 #ifdef _DEBUG
-	fprintf(stderr, "Checking status on OpenZVOL service ...\n");
+	fprintf(stderr, "Checking status on OpenZVOL service ... \n");
 	system("sc query OpenZVOL");
 #endif
 
@@ -1078,7 +1242,8 @@ bool hasOpenZFSInstallConfig(HKEY hKey)
 	const char *ptr = buffer.data();
 	while (*ptr)
 	{
-		if (_stricmp(ptr, "OpenZFS_Install") == 0 || _stricmp(ptr, "OpenZVOL_Install") == 0)
+		if (_stricmp(ptr, "OpenZFS_Install") == 0 || _stricmp(ptr, "OpenZVOL_Install") == 0 ||
+			_stricmp(ptr, "OpenZVOL.Install") == 0)
 			return true;
 		ptr += strlen(ptr) + 1;
 	}

@@ -259,6 +259,10 @@ copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\cmd\zed\zed.exe" "$(TargetDi
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\cmd\os\windows\zfsinstaller\zfsinstaller.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
     <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\cmd\zfs\zfs.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>

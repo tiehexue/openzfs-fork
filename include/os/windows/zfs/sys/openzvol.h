@@ -34,6 +34,7 @@
 void OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject);
 
 extern void printBuffer(const char *fmt, ...);
+#undef dprintf
 #define	dprintf printBuffer
 
 NTSYSCALLAPI NTSTATUS NTAPI ZwQuerySystemInformation(

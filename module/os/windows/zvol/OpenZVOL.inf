@@ -7,8 +7,8 @@
 ;;;
 [Version]
 Signature   = "$Windows NT$"
-Class       = Volume
-ClassGuid   = {71a27cdd-812a-11d0-bec7-08002be2092f}
+Class       = SCSIAdapter
+ClassGuid   = {4D36E97B-E325-11CE-BFC1-08002BE10318}
 Provider    = %Me%
 DriverVer   = 05/19/2018,1.0.2.0
 CatalogFile = OpenZVOL.cat
@@ -17,66 +17,43 @@ PnpLockdown = 1
 [DestinationDirs]
 DefaultDestDir          = 12
 OpenZVOL.DriverFiles       = 12            ;%windir%\system32\drivers
-OpenZVOL.DllFiles          = 11            ;%windir%\system32
 
 ;;
 ;; Default install sections
 ;;
 
-;[DefaultInstall]
-;OptionDesc  = %ServiceDescription%
-;CopyFiles   = OpenZVOL.DriverFiles
-;;;,OpenZVOL.DllFiles
-;RegisterDlls = shellOpenZVOL
-;CopyINF     = OpenZVOL.inf
-;
-;[DefaultInstall.Services]
-;AddService  = %ServiceName%,0x802,OpenZVOL.Service
-
 [Manufacturer]
 %Me%=Standard,NTamd64,NTx86,NTarm64
 
 [Standard.NTamd64]
-;%VolumeName% = OpenZVOL_Install, OpenZVOLVolume
-%DriverName% = OpenZVOL_Install, ROOT\OpenZVOL
-;%ControllerName% = OpenZVOL_Install, ROOT\OpenZVOL
+%DriverName% = OpenZVOL.Install, ROOT\OpenZVOL
 
 [Standard.NTx86]
-;%VolumeName% = OpenZVOL_Install, OpenZVOLVolume
-%DriverName% = OpenZVOL_Install, ROOT\OpenZVOL
-;%ControllerName% = OpenZVOL_Install, ROOT\OpenZVOL
+%DriverName% = OpenZVOL.Install, ROOT\OpenZVOL
 
 [Standard.NTarm64]
-;%VolumeName% = OpenZVOL_Install, OpenZVOLVolume
-%DriverName% = OpenZVOL_Install, ROOT\OpenZVOL
-;%ControllerName% = OpenZVOL_Install, ROOT\OpenZVOL
+%DriverName% = OpenZVOL.Install, ROOT\OpenZVOL
 
-[OpenZVOL_Install]
-OptionDesc   = %ServiceDescription%
-CopyFiles    = OpenZVOL.DriverFiles
-AddReg       = OpenZVOL_AddReg
+; Run by zfsintaller.exe
+[OpenZVOL.Install]
+OptionDesc     = %ServiceDescription%
+CopyFiles      = OpenZVOL.DriverFiles
 
-[OpenZVOL_AddReg]
-;HKR,,DeviceType,0x00010001,0x00000002
-;HKR,,Type,0x00010001,0x00000002 ; FILE_SYSTEM_DRIVER
-;HKR,,System.Devices.ContainerID,, "{00000001-0002-0003-0004-000000000001}"
-;HKR,,Group,0x00000000,"File System"
-HKR,,"UpperFilters",0x00010008,"OpenZVOL"
+[OpenZVOL.ClassInstall]
+AddReg         = OpenZVOL.AddReg
 
-;;,OpenZVOL.DllFiles
-;;RegisterDlls = shellOpenZVOL
+[OpenZVOL.AddReg]
 
-[OpenZVOL_Install.Services]
-AddService  = %ServiceName%,2,OpenZVOL.Service
+
+[OpenZVOL.Install.Services]
+AddService  = %ServiceName%,0x00000002,OpenZVOL.Service
 
 ;;
 ;; Default uninstall sections
 ;;
 
 [DefaultUninstall]
-UnregisterDlls = shellOpenZVOL
 DelFiles   = OpenZVOL.DriverFiles
-;;,OpenZVOL.DllFiles
 
 [DefaultUninstall.Services]
 DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
@@ -90,13 +67,10 @@ DisplayName      = %ServiceName%
 Description      = %ServiceDescription%
 ServiceBinary    = %12%\%DriverName%.sys    ;%windir%\system32\drivers\
 ServiceType      = 1
-StartType        = 1                        ;SERVICE_SYSTEM_START
+StartType        = 3                        ;SERVICE_SYSTEM_START
 ErrorControl     = 1
-LoadOrderGroup   = System Bus Extender
+LoadOrderGroup   = SCSI miniport
 DependOnService  = storport
-
-;;[shellOpenZVOL]
-;;11,,shellOpenZVOL.dll,1
 
 ;
 ; Copy Files
@@ -104,10 +78,6 @@ DependOnService  = storport
 
 [OpenZVOL.DriverFiles]
 %DriverName%.sys
-
-[OpenZVOL.DllFiles]
-;;zpool.exe
-;;zfs.exe
 
 [SourceDisksFiles]
 OpenZVOL.sys = 1,,
