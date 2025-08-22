@@ -5569,16 +5569,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		    &offset, *length, FALSE);
 	}
 
-	if (paging_io) {
-		if (!ExAcquireResourceSharedLite(
-		    vp->FileHeader.PagingIoResource, wait)) {
-			Status = STATUS_PENDING;
-			IoMarkIrpPending(Irp);
-			goto end;
-		} else
-			paging_lock = TRUE;
-	}
-
 	pagefile = vp->FileHeader.Flags2 & FSRTL_FLAG2_IS_PAGING_FILE &&
 	    paging_io;
 
@@ -5593,25 +5583,46 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 #endif
 
-	if (pagefile) {
-		if (!ExAcquireResourceSharedLite(vp->FileHeader.Resource,
-		    wait)) {
-			Status = STATUS_PENDING;
-			IoMarkIrpPending(Irp);
-			goto end;
-		} else {
-			acquired_vp_lock = TRUE;
+	// 1) if pagefile - grab MainResource, then PagingIoResource
+	// 2) elif pagingio - grab only PagingIoResource
+	// 3) elif normal io - grab only MainResource
+
+	if (paging_io) {
+
+		wait = TRUE;
+
+		if (pagefile) {
+			if (!ExAcquireResourceExclusiveLite(
+			    vp->FileHeader.Resource,
+			    wait)) {
+				Status = STATUS_PENDING;
+				IoMarkIrpPending(Irp);
+				goto end;
+			} else {
+				acquired_vp_lock = TRUE;
+			}
 		}
-	} else if (!ExIsResourceAcquiredExclusiveLite(
-	    vp->FileHeader.Resource)) {
 
 		if (!ExAcquireResourceExclusiveLite(
-		    vp->FileHeader.Resource, wait)) {
+		    vp->FileHeader.PagingIoResource, wait)) {
 			Status = STATUS_PENDING;
 			IoMarkIrpPending(Irp);
 			goto end;
 		} else {
-			acquired_vp_lock = TRUE;
+			paging_lock = TRUE;
+		}
+	} else {
+		if (!ExIsResourceAcquiredExclusiveLite(
+		    vp->FileHeader.Resource)) {
+
+			if (!ExAcquireResourceExclusiveLite(
+			    vp->FileHeader.Resource, wait)) {
+				Status = STATUS_PENDING;
+				IoMarkIrpPending(Irp);
+				goto end;
+			} else {
+				acquired_vp_lock = TRUE;
+			}
 		}
 	}
 
@@ -5891,11 +5902,11 @@ end:
 		    FileObject->CurrentByteOffset.QuadPart);
 	}
 
-	if (acquired_vp_lock)
-		ExReleaseResourceLite(vp->FileHeader.Resource);
-
 	if (paging_lock)
 		ExReleaseResourceLite(vp->FileHeader.PagingIoResource);
+
+	if (acquired_vp_lock)
+		ExReleaseResourceLite(vp->FileHeader.Resource);
 
 	return (Status);
 }
