@@ -3034,7 +3034,12 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp,
 	// dvp, either directly or from zget().
 	znode_t *dzp = NULL;
 
-	dvp = zfs_parent(vp);
+	if (dvp == NULL) {
+		dvp = zfs_parent(vp);
+	} else {
+		VERIFY0(VN_HOLD(dvp));
+	}
+
 	if (dvp == NULL)
 		goto err;
 	dzp = VTOZ(dvp);
@@ -3298,6 +3303,9 @@ zfs_parent(struct vnode *vp)
 
 	if (zp == NULL)
 		return (NULL);
+
+	if (zfsctl_is_node(zp))
+		return (zfs_root_dotdot(vp));
 
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	uint64_t parent;
