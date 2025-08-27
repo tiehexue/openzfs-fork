@@ -60,7 +60,7 @@ extern "C" {
 #define	FM_EREPORT_ZFS_CONFIG_CACHE_WRITE	"config_cache_write"
 #define	FM_EREPORT_ZFS_SNAPSHOT_MOUNT	"snapshot_mount"
 #define	FM_EREPORT_ZFS_SNAPSHOT_UNMOUNT	"snapshot_unmount"
-
+#define	FM_EREPORT_ZFS_SITOUT			"sitout"
 #define	FM_EREPORT_PAYLOAD_ZFS_POOL		"pool"
 #define	FM_EREPORT_PAYLOAD_ZFS_POOL_FAILMODE	"pool_failmode"
 #define	FM_EREPORT_PAYLOAD_ZFS_POOL_GUID	"pool_guid"
