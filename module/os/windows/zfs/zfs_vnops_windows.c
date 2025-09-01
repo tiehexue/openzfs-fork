@@ -6721,7 +6721,8 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	struct vnode *vp = FileObject->FsContext;
 	zfs_ccb_t *zccb = FileObject->FsContext2;
-	boolean_t flush = B_TRUE;
+	boolean_t purge = B_FALSE;
+	boolean_t locked = B_FALSE;
 
 	if (zmo->type != MOUNT_TYPE_VCB) {
 		Status = STATUS_SUCCESS;
@@ -6747,8 +6748,6 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	// messages belonging to other devices.
 	fzmo = vp->v_mount;
 
-	boolean_t locked = TRUE;
-
 	FsRtlCheckOplock(vp_oplock(vp), Irp, NULL, NULL, NULL);
 
 	znode_t *zp = VTOZ(vp); // zp for notify removal
@@ -6760,6 +6759,7 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	// ExAcquireResourceSharedLite(&fcb->Vcb->tree_lock, true);
 
 	ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+	locked = B_TRUE;
 
 	IoRemoveShareAccess(FileObject, &vp->share_access);
 
@@ -6834,7 +6834,7 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 			zp = NULL;
 
-			flush = B_FALSE;
+			purge = B_TRUE;
 // FILE_CLEANUP_UNKNOWN FILE_CLEANUP_WRONG_DEVICE FILE_CLEANUP_FILE_REMAINS
 // FILE_CLEANUP_FILE_DELETED FILE_CLEANUP_LINK_DELETED
 // FILE_CLEANUP_STREAM_DELETED FILE_CLEANUP_POSIX_STYLE_DELETE
@@ -6852,18 +6852,12 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			/* Not deleting, but lastclose */
 	}
 
-
-	if (flush &&
-	    (FileObject->Flags & FO_CACHE_SUPPORTED) &&
+	if ((FileObject->Flags & FO_CACHE_SUPPORTED) &&
 	    FileObject->SectionObjectPointer &&
 	    FileObject->SectionObjectPointer->DataSectionObject) {
 		IO_STATUS_BLOCK iosb;
 
-		if (locked) {
-			ExReleaseResourceLite(vp->FileHeader.Resource);
-			locked = FALSE;
-		}
-
+		// Always flush
 		CcFlushCache(FileObject->SectionObjectPointer, NULL, 0,
 		    &iosb);
 
@@ -6871,17 +6865,22 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			dprintf("CcFlushCache returned %08lx\n",
 			    iosb.Status);
 
-		if (!ExIsResourceAcquiredSharedLite(
-		    vp->FileHeader.PagingIoResource)) {
-			ExAcquireResourceExclusiveLite(
-			    vp->FileHeader.PagingIoResource,
-			    TRUE);
-			ExReleaseResourceLite(
-			    vp->FileHeader.PagingIoResource);
-		}
+		if (purge) {
+			// Only purge in delete branch
 
-		CcPurgeCacheSection(FileObject->SectionObjectPointer,
-		    NULL, 0, FALSE);
+			if (!ExIsResourceAcquiredSharedLite(
+			    vp->FileHeader.PagingIoResource)) {
+				ExAcquireResourceExclusiveLite(
+				    vp->FileHeader.PagingIoResource,
+				    TRUE);
+				ExReleaseResourceLite(
+				    vp->FileHeader.PagingIoResource);
+			}
+
+			dprintf("Purging cache due to delet\n");
+			CcPurgeCacheSection(FileObject->SectionObjectPointer,
+			    NULL, 0, FALSE);
+		}
 
 		dprintf("flushed cache on close (fo = %p, vp = %p, "
 		    "AllocationSize = %I64x, FileSize = %I64x, "
@@ -6897,7 +6896,7 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		ExReleaseResourceLite(vp->FileHeader.Resource);
 
 	// ExReleaseResourceLite(&vp->Vcb->tree_lock);
-	if (zccb && zccb->cacheinit) {
+	if (zccb && zccb->cacheinit && FileObject->PrivateCacheMap) {
 		dprintf("CcUninitializeCacheMap on vp %p fo %p, Vpb %p\n",
 		    vp, FileObject, FileObject->Vpb);
 		atomic_dec_64(&zccb->cacheinit);
