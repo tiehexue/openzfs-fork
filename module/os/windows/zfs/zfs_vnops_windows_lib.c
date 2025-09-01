@@ -3000,11 +3000,14 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp,
     PACCESS_STATE access_state)
 {
 	SECURITY_SUBJECT_CONTEXT subjcont;
+	PSECURITY_SUBJECT_CONTEXT psubjcont = NULL;
 	NTSTATUS Status = STATUS_INVALID_PARAMETER;
 	SID *usersid = NULL, *groupsid = NULL;
 	int error = 0;
 	boolean_t defaulted;
 	uint8_t *buf = NULL;
+	boolean_t allocated_usersid = B_FALSE;
+	boolean_t allocated_groupsid = B_FALSE;
 
 	if (vp == NULL)
 		return (Status);
@@ -3052,13 +3055,22 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp,
 	ASSERT(dzp != NULL);
 	ASSERT(vnode_security(dvp) != NULL);
 
-	SeCaptureSubjectContext(&subjcont);
+	ULONG flags = SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT;
+
+	if (access_state != NULL) {
+		psubjcont = &access_state->SubjectSecurityContext;
+	} else {
+		flags |= SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT;
+		SeCaptureSubjectContext(&subjcont);
+		psubjcont = &subjcont;
+	}
+
 	void *sd = NULL;
 	Status = SeAssignSecurityEx(vnode_security(dvp),
 	    access_state ? access_state->SecurityDescriptor : NULL,
 	    (void**)&sd,
-	    NULL, vnode_isdir(vp)?TRUE:FALSE, SEF_DACL_AUTO_INHERIT,
-	    &subjcont, IoGetFileObjectGenericMapping(), PagedPool);
+	    NULL, vnode_isdir(vp)?TRUE:FALSE, flags,
+	    psubjcont, IoGetFileObjectGenericMapping(), PagedPool);
 
 	if (Status != STATUS_SUCCESS)
 		goto err;
@@ -3133,8 +3145,6 @@ zfs_attach_security(struct vnode *vp, struct vnode *dvp,
 		dprintf("RtlSelfRelativeToAbsoluteSD returned %08lx\n", Status);
 		goto err;
 	}
-	boolean_t allocated_usersid = B_FALSE;
-	boolean_t allocated_groupsid = B_FALSE;
 
 	// Only convert over uid if SD does not contain OwnerID
 	if (usersid == NULL) {
@@ -3199,6 +3209,9 @@ err:
 	if (dvp)
 		VN_RELE(dvp);
 	zfs_exit(zfsvfs, FTAG);
+
+	if (psubjcont == &subjcont)
+		SeReleaseSubjectContext(&subjcont);
 
 	if (buf != NULL)
 		ExFreePool(buf);
