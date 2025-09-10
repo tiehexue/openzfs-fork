@@ -203,6 +203,20 @@ atomic_swap_32(volatile uint32_t *_target, uint32_t _new)
 	return (InterlockedExchange((volatile LONG *)_target, _new));
 }
 
+#if defined(__clang__)
+static inline uint32_t
+atomic_load_32(volatile uint32_t *target)
+{
+	return (__atomic_load_n(target, __ATOMIC_RELAXED));
+}
+
+static inline void
+atomic_store_32(volatile uint32_t *target, uint32_t bits)
+{
+	return (__atomic_store_n(target, bits, __ATOMIC_RELAXED));
+}
+#endif
+
 static inline uint64_t
 atomic_swap_64(volatile uint64_t *_target, uint64_t _new)
 {
