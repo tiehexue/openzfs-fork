@@ -4046,10 +4046,17 @@ set_file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	VN_HOLD(fvp);
 	// "tvp"(if not NULL) and "tdvp" is held by zfs_find_dvp_vp
 
-	// What about link->ReplaceIfExist ?
+	if (tvp != NULL &&
+	    (!MmFlushImageSection(&tvp->SectionObjectPointers,
+	    MmFlushForWrite))) {
+		error = STATUS_ACCESS_DENIED;
+		goto out;
+	}
 
+	// What about link->ReplaceIfExist ?
 	error = zfs_link(VTOZ(tdvp), VTOZ(fvp),
-	    remainder ? remainder : filename, NULL, 0);
+	    remainder ? remainder : filename, NULL,
+	    link->ReplaceIfExists ? FLINKREPLACE : 0);
 
 	if (error == 0) {
 
@@ -4067,6 +4074,13 @@ set_file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		}
 #endif
 	}
+
+	switch (error) {
+	case EEXIST:
+		error = STATUS_ACCESS_DENIED;
+		break;
+	}
+
 	// Release all holds
 out:
 	if (RootFileObject)

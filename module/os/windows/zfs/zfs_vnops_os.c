@@ -3181,6 +3181,11 @@ zfs_readlink(struct vnode *vp, zfs_uio_t *uio, cred_t *cr)
  *	RETURN:	0 if success
  *		error code if failure
  *
+ * EXTENDED FROM UPSTREAM: currently "flags" only uses
+ * FIGNORECASE, but we will add FLINKREPLACE to it, so
+ * we can control whether we want to replace an existing
+ * file or not, as this is something Windows can do.
+ *
  * Timestamps:
  *	tdzp - ctime|mtime updated
  *	 szp - ctime updated
@@ -3190,7 +3195,7 @@ zfs_link(znode_t *tdzp, znode_t *szp, char *name, cred_t *cr,
     int flags)
 {
 	struct vnode *svp = ZTOV(szp);
-	znode_t		*tzp;
+	znode_t		*tzp = NULL;
 	zfsvfs_t	*zfsvfs = ZTOZSB(tdzp);
 	zilog_t		*zilog;
 	zfs_dirlock_t	*dl;
@@ -3204,6 +3209,10 @@ zfs_link(znode_t *tdzp, znode_t *szp, char *name, cred_t *cr,
 	uint64_t	txg;
 
 	ASSERT(S_ISDIR(tdzp->z_mode));
+
+	// Allow it to exist if replacing.
+	if (flags & FLINKREPLACE)
+		zf &= ~ZNEW;
 
 	if (is_nametoolong(zfsvfs, name))
 		return (SET_ERROR(ENAMETOOLONG));
@@ -3306,6 +3315,13 @@ top:
 	if (is_tmpfile)
 		dmu_tx_hold_zap(tx, zfsvfs->z_unlinkedobj, FALSE, NULL);
 
+	if (tzp != NULL &&
+	    (flags & FLINKREPLACE)) {
+		dmu_tx_hold_zap(tx, zfsvfs->z_unlinkedobj, FALSE, NULL);
+		dmu_tx_hold_sa(tx, tzp->z_sa_hdl, B_FALSE);
+		zfs_sa_upgrade_txholds(tx, tzp);
+	}
+
 	zfs_sa_upgrade_txholds(tx, szp);
 	zfs_sa_upgrade_txholds(tx, tdzp);
 	error = dmu_tx_assign(tx, (waited ? TXG_NOTHROTTLE : 0) | TXG_NOWAIT);
@@ -3318,11 +3334,18 @@ top:
 			goto top;
 		}
 		dmu_tx_abort(tx);
+		if (tzp != NULL)
+			zrele(tzp);
 		zfs_exit(zfsvfs, FTAG);
 		return (error);
 	}
 
-	error = zfs_link_create(dl, szp, tx, 0);
+	if (tzp != NULL &&
+	    (flags & FLINKREPLACE))
+		error = zfs_link_destroy(dl, tzp, tx, 0, NULL);
+
+	if (error == 0)
+		error = zfs_link_create(dl, szp, tx, 0);
 
 	if (error == 0) {
 		uint64_t txtype = TX_LINK;
@@ -3337,6 +3360,9 @@ top:
 	dmu_tx_commit(tx);
 
 	zfs_dirent_unlock(dl);
+
+	if (tzp != NULL)
+		zrele(tzp);
 
 	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 		zil_commit(zilog, 0);
