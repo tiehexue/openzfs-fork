@@ -65,6 +65,8 @@ struct zfs_ccb {
 	boolean_t user_set_write_time;
 	boolean_t user_set_change_time;
 	ACCESS_MASK access;
+
+	boolean_t HoldsOplock;
 };
 
 typedef struct zfs_ccb zfs_ccb_t;
@@ -74,6 +76,22 @@ extern uint64_t zfs_module_busy;
 #define	DIR_LINKS(zp) \
 	(S_ISDIR((zp)->z_mode) ? (zp)->z_links - 1 : (zp)->z_links)
 
+#define	OPLOCK_SKIP_MAGIC   0x99ff77ee11aa5500 // put skip type in last byte
+#define	OPLOCK_SKIP_MASK    0xffffffffffffff00
+#define	OPLOCK_SKIP_NONE    (0 << 0)
+#define	OPLOCK_SKIP_CREATE  (1 << 0)
+#define	OPLOCK_SKIP_LOCK    (1 << 1)
+#define	OPLOCK_SKIP_SETINFO (1 << 2)
+#define	OPLOCK_SKIP_ZERODATA (1 << 3)
+
+typedef struct ZFS_OPLOCK_CREATE_STRUCT {
+    PDEVICE_OBJECT DeviceObject;
+    PIRP Irp;
+    PIO_WORKITEM WorkItem;
+    uint64_t SkipMask;
+} ZFS_OPLOCK_CREATE_CTX;
+extern void ZfsOplockCreatePostBreak(_In_ PVOID Context, _In_ PIRP Irp);
+
 extern CACHE_MANAGER_CALLBACKS CacheManagerCallbacks;
 
 extern uint64_t zfs_mount_reentry;
@@ -82,6 +100,7 @@ extern uint_t zfs_mount_reentry_tsd;
 extern NTSTATUS dev_ioctl(PDEVICE_OBJECT DeviceObject, ULONG ControlCode,
     PVOID InputBuffer, ULONG InputBufferSize, PVOID OutputBuffer,
     ULONG OutputBufferSize, BOOLEAN Override, IO_STATUS_BLOCK* iosb);
+extern int zfs_vnop_lookup(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo);
 
 extern int zfs_windows_mount(zfs_cmd_t *zc);
 extern int zfs_windows_unmount(zfs_cmd_t *zc);

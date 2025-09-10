@@ -81,6 +81,7 @@ struct vnode {
 	SECTION_OBJECT_POINTERS SectionObjectPointers;
 
 	OPLOCK oplock;
+	uint64_t OplockRefCount;
 
 	// Our implementation data fields
 	// KSPIN_LOCK v_spinlock;

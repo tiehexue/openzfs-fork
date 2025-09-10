@@ -867,6 +867,185 @@ checkname:
 }
 
 /*
+ * OpLock magic
+ */
+
+// When oplock has been resolved, and we are at the right
+// level, this worker will be called to finish the IRP.
+static void
+ZfsOplockCreateWorker(_In_ PDEVICE_OBJECT DevObj, _In_ PVOID Context)
+{
+	ZFS_OPLOCK_CREATE_CTX *ctx = (ZFS_OPLOCK_CREATE_CTX *)Context;
+	PIRP Irp = ctx->Irp;
+	NTSTATUS status;
+
+	if (ctx->WorkItem)
+		IoFreeWorkItem(ctx->WorkItem);
+
+	// Mark this Irp has having already been through OpLock, and not
+	// go through the same test again.
+	Irp->Tail.Overlay.DriverContext[0] =
+	    (void *)(OPLOCK_SKIP_MAGIC | ctx->SkipMask);
+
+	ExFreePoolWithTag(ctx, 'plkO');
+
+	dprintf("%s: calling dispatcher\n", __func__);
+	status = dispatcher(DevObj, Irp);
+	dprintf("%s: dispatcher returned %ld\n", __func__, status);
+}
+
+// When oplock has been resolved, but running at wrong
+// level, punt it off to a work item.
+void
+ZfsOplockCreatePostBreak(_In_ PVOID Context, _In_ PIRP Irp)
+{
+	ZFS_OPLOCK_CREATE_CTX *ctx = (ZFS_OPLOCK_CREATE_CTX *)Context;
+
+	dprintf("%s: punting to WorkItem\n", __func__);
+
+	ctx->WorkItem = IoAllocateWorkItem(ctx->DeviceObject);
+	if (!ctx->WorkItem) {
+		// Fail the IRP if we can’t resume safely
+		Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+		Irp->IoStatus.Information = 0;
+		// FsRtlCompleteRequest(Irp, Irp->IoStatus.Status);
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		ExFreePoolWithTag(ctx, 'plkO');
+		return;
+	}
+
+	IoQueueWorkItem(
+	    ctx->WorkItem,
+	    ZfsOplockCreateWorker,
+	    DelayedWorkQueue,
+	    ctx);
+}
+
+/*
+ * Call from CREATE path *after* vp is known, *before* coupling,
+ * holding/releasing vp->FileHeader.Resource around this call as you do now.
+ */
+static
+NTSTATUS
+zfs_preflight_oplock_on_open_existing(
+    PDEVICE_OBJECT DeviceObject,
+    vnode_t *vp,
+    PIRP Irp,
+    PIO_STACK_LOCATION IrpSp,
+    uint32_t vp_usecount,
+    BOOLEAN skipCreate)
+{
+	NTSTATUS st;
+	ULONG fsrtlFlags = 0;
+	ZFS_OPLOCK_CREATE_CTX *ctx = NULL;
+
+	const ULONG Options = IrpSp->Parameters.Create.Options;
+	const UCHAR disp = (UCHAR)((Options >> 24) & 0xFF);
+	const ACCESS_MASK da = IrpSp->Parameters.Create.SecurityContext
+	    ? IrpSp->Parameters.Create.SecurityContext->DesiredAccess
+	    : 0;
+
+	const BOOLEAN requiring =
+	    (Options & FILE_OPEN_REQUIRING_OPLOCK) ? TRUE : FALSE;
+	const BOOLEAN callerComplete =
+	    (Options & FILE_COMPLETE_IF_OPLOCKED) ? TRUE : FALSE;
+	const BOOLEAN delOnClose =
+	    (Options & FILE_DELETE_ON_CLOSE) != 0;
+
+	const BOOLEAN willModifyData =
+	    (disp == FILE_SUPERSEDE) ||
+	    (disp == FILE_OVERWRITE) ||
+	    (disp == FILE_OVERWRITE_IF);
+
+	const BOOLEAN writeIntent =
+	    (da & (FILE_WRITE_DATA | FILE_APPEND_DATA |
+	    FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA)) ? TRUE : FALSE;
+
+	const BOOLEAN deleteIntent =
+	    (da & DELETE) ? TRUE : FALSE;
+
+	const BOOLEAN willWriteOrDelete = writeIntent || deleteIntent ||
+	    delOnClose || willModifyData;
+
+
+	// 4th: plain second-open (no special flags, not modifying) allow pend
+	const BOOLEAN isGenericSecondOpen =
+	    (!requiring && !callerComplete && !willModifyData &&
+	    (vp_usecount > 0));
+
+	// Decide how we'll call FsRtl:
+	BOOLEAN needCheck = FALSE; // whether to call FsRtlCheckOplockEx at all
+	BOOLEAN allowPend = FALSE; // if TRUE provide ctx/callback
+
+	// (1) REQUIRING: no pend, conservative fast-fail first
+	if (requiring) {
+		if (vp->OplockRefCount > 0)
+			return (STATUS_CANNOT_BREAK_OPLOCK);
+		needCheck = TRUE;
+		allowPend = FALSE;
+		fsrtlFlags |= OPLOCK_FLAG_COMPLETE_IF_OPLOCKED;
+	} else if (!skipCreate && willWriteOrDelete) {
+		// (2) Data-modifying pend if needed
+		// (ignore COMPLETE_IF_OPLOCKED)
+		needCheck = TRUE;
+		allowPend = TRUE;
+	} else if (!skipCreate && isGenericSecondOpen) {
+		// (4) Generic second-open pend if needed
+		needCheck = TRUE;
+		allowPend = TRUE;
+	} else if (callerComplete) {
+		// (3) Caller COMPLETE_IF_OPLOCKED (non-modifying) no pend
+		needCheck = TRUE;
+		allowPend = FALSE;
+		fsrtlFlags |= OPLOCK_FLAG_COMPLETE_IF_OPLOCKED;
+	}
+
+	if (!needCheck)
+		return (STATUS_SUCCESS);
+
+	if (allowPend) {
+		ctx = ExAllocatePoolZero(NonPagedPoolNx, sizeof (*ctx), 'plkO');
+		if (!ctx)
+			return (STATUS_INSUFFICIENT_RESOURCES);
+		ctx->DeviceObject = DeviceObject;
+		ctx->SkipMask = OPLOCK_SKIP_CREATE;
+		ctx->Irp = Irp;
+	}
+
+	st = FsRtlCheckOplockEx(
+	    vp_oplock(vp),
+	    Irp,
+	    fsrtlFlags,
+	    ctx,
+	    allowPend ? ZfsOplockCreatePostBreak : NULL,
+	    NULL);
+
+	if (st == STATUS_PENDING) {
+		if (allowPend) {
+			IoMarkIrpPending(Irp);
+			return (STATUS_PENDING);
+		}
+		// Defensive: no-pend mode should not return PENDING
+		IoCancelIrp(Irp);
+		if (requiring)
+			return (STATUS_CANNOT_BREAK_OPLOCK);
+		return (STATUS_OPLOCK_BREAK_IN_PROGRESS);
+	}
+
+	if (ctx != NULL)
+		ExFreePoolWithTag(ctx, 'plkO');
+
+	if (requiring) {
+		if (st == STATUS_OPLOCK_BREAK_IN_PROGRESS)
+			return (STATUS_CANNOT_BREAK_OPLOCK);
+	}
+
+	return (st); // SUCCESS or terminal error
+}
+
+/* End of oplock */
+
+/*
  * Attempt to parse 'filename', descending into filesystem.
  * If start "dvp" is passed in, it is expected to have a HOLD
  * If successful, function will return with:
@@ -1137,6 +1316,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 	    IrpSp->Parameters.Create.SecurityContext->DesiredAccess;
 	zfs_ccb_t *zccb = NULL;
 	vattr_t *vap = &xvap->xva_vattr;
+	boolean_t return_break_in_progress = B_FALSE; // oplock special case
 
 	if (zfsvfs == NULL)
 		return (STATUS_OBJECT_PATH_NOT_FOUND);
@@ -1660,6 +1840,61 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 	// Here we have "dvp" of the directory.
 	// "vp" if the final part was a file.
 
+	// vv OPLOCK
+	if (vp != NULL) {
+		const uint32_t vp_usecount = atomic_load_32(&vp->v_usecount);
+		uint64_t oplock_skip =
+		    (uint64_t)Irp->Tail.Overlay.DriverContext[0];
+		dprintf("oplock_skip is 0x%llx\n", oplock_skip);
+		BOOLEAN skipCreate =
+		    (oplock_skip == (OPLOCK_SKIP_MAGIC | OPLOCK_SKIP_CREATE));
+
+		if (BooleanFlagOn(Options, FILE_RESERVE_OPFILTER)) {
+			// Must be the first user handle on the stream.
+			if (vp_usecount > 0) {
+				VN_RELE(vp);
+				VN_RELE(dvp);
+				return (STATUS_OPLOCK_NOT_GRANTED);
+			}
+		}
+
+		ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+
+		Status = zfs_preflight_oplock_on_open_existing(
+		    IrpSp->DeviceObject,
+		    vp,
+		    Irp,
+		    IrpSp,
+		    vp_usecount,
+		    skipCreate);
+
+		ExReleaseResourceLite(vp->FileHeader.Resource);
+
+		if (Status == STATUS_PENDING) {
+			VN_RELE(vp);
+			VN_RELE(dvp);
+			return (STATUS_PENDING);
+		}
+
+		if (Status == STATUS_OPLOCK_BREAK_IN_PROGRESS) {
+			// FILE_COMPLETE_IF_OPLOCKED path: return as-is (!pend)
+			// STATUS_OPLOCK_BREAK_IN_PROGRESS will pass
+			// NT_SUCCESS() so everything better use it above us.
+			// We continue to open the file as normal.
+			return_break_in_progress = B_TRUE;
+		}
+
+		if (!NT_SUCCESS(Status)) {
+			// STATUS_CANNOT_BREAK_OPLOCK from REQUIRING_OPLOCK,
+			// or any other terminal error from FsRtl.
+			VN_RELE(vp);
+			VN_RELE(dvp);
+			return (Status);
+		}
+	}
+
+	// ^^ OPLOCK
+
 	// Don't create if FILE_OPEN_IF (open existing)
 	if ((CreateDisposition == FILE_OPEN_IF) && (vp != NULL))
 		CreateDirectory = 0;
@@ -1734,7 +1969,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			if (DeleteOnClose)
 				Status = zfs_setunlink_masked(FileObject, dvp);
 
-			if (Status == STATUS_SUCCESS) {
+			if (NT_SUCCESS(Status)) {
 
 				Irp->IoStatus.Information = FILE_CREATED;
 
@@ -1891,6 +2126,10 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 				dprintf("%s: denied due to SeAccessCheck()\n",
 				    __func__);
 				DUMP_SD(vnode_security(vp ? vp : dvp));
+				if (NT_SUCCESS(Status) &&
+				    return_break_in_progress)
+					Status =
+					    STATUS_OPLOCK_BREAK_IN_PROGRESS;
 				return (Status);
 			}
 #endif
@@ -1984,6 +2223,20 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		case FILE_SUPERSEDE:
 		case FILE_OVERWRITE_IF:
 		case FILE_OVERWRITE:
+
+			// Additionally, if overwriting, set size to 0
+			// after checking it is not memory mapped.
+			if (vp != NULL) {
+				if (!MmFlushImageSection(
+				    &vp->SectionObjectPointers,
+				    MmFlushForWrite)) {
+					UNDO_SHARE_ACCESS(vp);
+					VN_RELE(vp);
+					VN_RELE(dvp);
+					Irp->IoStatus.Information = 0; // ?
+					return (STATUS_SHARING_VIOLATION);
+				}
+			}
 			vap->va_mask |= ATTR_SIZE;
 			vap->va_size = 0;
 			break;
@@ -2058,6 +2311,10 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 					    NULL);
 				}
 			}
+
+			if (NT_SUCCESS(Status) && return_break_in_progress)
+				Status = STATUS_OPLOCK_BREAK_IN_PROGRESS;
+
 		/* Windows lets you create a file, and stream, in one. */
 		/* Call this function again, lets hope, only once */
 			if (NT_SUCCESS(Status) && reenter_for_xattr) {
@@ -2101,7 +2358,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		if (DeleteOnClose)
 			Status = zfs_setunlink_masked(FileObject, NULL);
 
-		if (Status == STATUS_SUCCESS) {
+		if (NT_SUCCESS(Status)) {
 			if (UndoShareAccess == FALSE) {
 				vnode_lock(dvp);
 				IoSetShareAccess(
@@ -2130,7 +2387,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		if (DeleteOnClose)
 			Status = zfs_setunlink_masked(FileObject, dvp);
 
-		if (Status == STATUS_SUCCESS) {
+		if (NT_SUCCESS(Status)) {
 
 			Irp->IoStatus.Information = FILE_OPENED;
 
@@ -2165,6 +2422,9 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 	    PreviouslyGrantedAccess |= granted_access;
 	IrpSp->Parameters.Create.SecurityContext->AccessState->
 	    RemainingDesiredAccess &= ~(granted_access | MAXIMUM_ALLOWED);
+
+	if (NT_SUCCESS(Status) && return_break_in_progress)
+		Status = STATUS_OPLOCK_BREAK_IN_PROGRESS;
 
 	return (Status);
 }
@@ -2988,19 +3248,105 @@ query_volume_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	return (Status);
 }
 
-
 NTSTATUS
-lock_control(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
+lock_control(PDEVICE_OBJECT DeviceObject, PIRP *PIrp, PIO_STACK_LOCATION IrpSp)
 {
+	PIRP Irp = *PIrp;
 	NTSTATUS Status = STATUS_SUCCESS;
+	PFILE_OBJECT Fo = IrpSp->FileObject;
+	vnode_t *vp = Fo ? Fo->FsContext : NULL;
+	ZFS_OPLOCK_CREATE_CTX *ctx = NULL;
 
 	dprintf("%s: FileObject %p flags 0x%x %s %s\n", __func__,
 	    IrpSp->FileObject, IrpSp->Flags,
 	    IrpSp->Flags & SL_EXCLUSIVE_LOCK ? "Exclusive" : "Shared",
 	    IrpSp->Flags & SL_FAIL_IMMEDIATELY ? "Nowait" : "Wait");
 
-	return (Status);
+	if (!vp)
+		return (STATUS_INVALID_PARAMETER);
+
+	uint64_t skip = (uint64_t)Irp->Tail.Overlay.DriverContext[0];
+	dprintf("%s skip is set to 0x%llx\n", __func__, skip);
+
+	switch (IrpSp->MinorFunction) {
+	case IRP_MN_LOCK: {
+
+		// If we’re re-entering from our work item (resume),
+		// skip the preflight
+		const BOOLEAN skipPreflight =
+		    (skip == (OPLOCK_SKIP_MAGIC | OPLOCK_SKIP_LOCK));
+
+		if (!skipPreflight) {
+
+			// === Oplock preflight (may pend) ===
+			ExAcquireResourceExclusiveLite(vp->FileHeader.Resource,
+			    TRUE);
+
+			ctx = ExAllocatePoolZero(NonPagedPoolNx, sizeof (*ctx),
+			    'plkO');
+			if (!ctx) {
+				ExReleaseResourceLite(vp->FileHeader.Resource);
+				return (STATUS_INSUFFICIENT_RESOURCES);
+			}
+
+			ctx->DeviceObject = DeviceObject;
+			ctx->Irp = Irp;
+			ctx->SkipMask = OPLOCK_SKIP_LOCK;
+
+			// No COMPLETE_IF_OPLOCKED here
+			// we want to wait for break if needed
+			Status = FsRtlCheckOplockEx(
+			    vp_oplock(vp),
+			    Irp,
+			    0,
+			    ctx,
+			    ctx ? ZfsOplockCreatePostBreak : NULL,
+			    NULL);
+
+			ExReleaseResourceLite(vp->FileHeader.Resource);
+
+			if (Status == STATUS_PENDING) {
+				IoMarkIrpPending(Irp);
+				return (STATUS_PENDING);
+			}
+
+			ExFreePoolWithTag(ctx, 'plkO');
+
+			if (!NT_SUCCESS(Status))
+				return (Status);
+
+		} // skipPreflight
+
+		// === Lock tail: actually install the BRL and complete ===
+		Status = FsRtlProcessFileLock(&vp->lock, Irp, NULL);
+
+		// if (Status == STATUS_PENDING)
+			// IoMarkIrpPending(Irp);
+
+		*PIrp = NULL; // FsRtlProcessFileLock completes
+		return (Status);
+	} // IRP_MN_LOCK
+
+	case IRP_MN_UNLOCK_SINGLE:
+	case IRP_MN_UNLOCK_ALL:
+	case IRP_MN_UNLOCK_ALL_BY_KEY: {
+		// No oplock preflight for unlocks
+		Status = FsRtlProcessFileLock(&vp->lock, Irp, NULL);
+
+		// if (Status == STATUS_PENDING)
+		//	IoMarkIrpPending(Irp);
+
+		*PIrp = NULL;
+		return (Status);
+	}
+
+	default:
+		break;
+	}
+
+	return (STATUS_INVALID_DEVICE_REQUEST);
 }
+
 
 NTSTATUS
 query_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
@@ -4257,15 +4603,9 @@ query_file_regions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	return (STATUS_INVALID_PARAMETER);
 }
 
-typedef BOOLEAN
-	(__stdcall *tFsRtlCheckLockForOplockRequest)
-	(PFILE_LOCK FileLock, PLARGE_INTEGER AllocationSize);
-typedef BOOLEAN
-	(__stdcall *tFsRtlAreThereCurrentOrInProgressFileLocks)
-	(PFILE_LOCK FileLock);
-tFsRtlCheckLockForOplockRequest fFsRtlCheckLockForOplockRequest = NULL;
-tFsRtlAreThereCurrentOrInProgressFileLocks \
-    fFsRtlAreThereCurrentOrInProgressFileLocks = NULL;
+#ifndef OPLOCK_LEVEL_CACHE_NONE
+#define	OPLOCK_LEVEL_CACHE_NONE    0x00000000
+#endif
 
 NTSTATUS
 request_oplock(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
@@ -4284,8 +4624,9 @@ request_oplock(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		return (STATUS_INVALID_PARAMETER);
 
 	struct vnode *vp = IrpSp->FileObject->FsContext;
+	zfs_ccb_t *zccb = IrpSp->FileObject->FsContext2;
 
-	if (vp == NULL)
+	if (vp == NULL || zccb == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
 	znode_t *zp = VTOZ(vp);
@@ -4305,6 +4646,11 @@ request_oplock(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		goto out;
 	}
 
+	//
+	// Determine shared vs exclusive request using FsRtl helper
+	//
+	const BOOLEAN isShared = FsRtlOplockIsSharedRequest(Irp);
+
 	if (fsctl == FSCTL_REQUEST_OPLOCK) {
 		if (IrpSp->Parameters.FileSystemControl.InputBufferLength <
 		    sizeof (REQUEST_OPLOCK_INPUT_BUFFER)) {
@@ -4316,6 +4662,14 @@ request_oplock(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 			Status = STATUS_BUFFER_TOO_SMALL;
 			goto out;
 		}
+
+		if (vnode_isdir(vp)) {
+			if (!isShared) {
+				Status = STATUS_INVALID_PARAMETER;
+				goto out;
+			}
+		}
+
 		buf = Irp->AssociatedIrp.SystemBuffer;
 
 		// flags are mutually exclusive
@@ -4334,106 +4688,120 @@ request_oplock(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		}
 	}
 
-	boolean_t shared_request = (fsctl == FSCTL_REQUEST_OPLOCK_LEVEL_2) ||
-	    (fsctl == FSCTL_REQUEST_OPLOCK &&
-	    !(buf->RequestedOplockLevel & OPLOCK_LEVEL_CACHE_WRITE));
-
-	if (vnode_isdir(vp) && (fsctl != FSCTL_REQUEST_OPLOCK ||
-	    !shared_request)) {
-		dprintf("oplock requests on directories can only be "
-		    "for read or read-handle oplocks\n");
-		Status = STATUS_INVALID_PARAMETER;
-		goto out;
+	if (vnode_isdir(vp)) {
+		switch (fsctl) {
+		case FSCTL_REQUEST_OPLOCK_LEVEL_1:
+		case FSCTL_REQUEST_OPLOCK_LEVEL_2:
+		case FSCTL_REQUEST_BATCH_OPLOCK:
+		case FSCTL_REQUEST_FILTER_OPLOCK:
+			Status = STATUS_INVALID_PARAMETER;
+			goto out;
+		default:
+			break;
+		}
 	}
 
-	// research this
-	// ExAcquireResourceSharedLite(&Vcb->tree_lock, true);
-
-	ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
-
-	// Does windows have something like "attribute availability (function)"
-	// for dynamic checks?
-	// FastFat example uses #ifdef NTDDI-VERSION which is compile time,
-	// we should look into
-	// winbtrfs:
-	// RtlInitUnicodeString(&name, L"FsRtlCheckLockForOplockRequest");
-	// fFsRtlCheckLockForOplockRequest =
-	// 	(tFsRtlCheckLockForOplockRequest)
-	// 	MmGetSystemRoutineAddress(&name);
-	// move me to init place
-	static int firstrun = 1;
-	if (firstrun) {
-		UNICODE_STRING name;
-		RtlInitUnicodeString(&name, L"FsRtlCheckLockForOplockRequest");
-		fFsRtlCheckLockForOplockRequest =
-		    (tFsRtlCheckLockForOplockRequest)
-		    MmGetSystemRoutineAddress(&name);
-		RtlInitUnicodeString(&name,
-		    L"FsRtlAreThereCurrentOrInProgressFileLocks");
-		fFsRtlAreThereCurrentOrInProgressFileLocks =
-		    (tFsRtlAreThereCurrentOrInProgressFileLocks)
-		    MmGetSystemRoutineAddress(&name);
-		firstrun = 0;
+	//
+	// OPEN COUNT per docs:
+	//  - Exclusive request: number of *user* handles to this stream.
+	//  - Shared request: 0 if no byte-range locks are present.
+	//
+	ULONG openCount = 0;
+	if (isShared) {
+		openCount = FsRtlAreThereCurrentOrInProgressFileLocks(
+		    &vp->lock) ? 1 : 0;
+	} else {
+		// Your per-FCB user handle count
+		openCount = (int)vp->v_usecount;
 	}
 
-	if (fsctl == FSCTL_REQUEST_OPLOCK_LEVEL_1 ||
-	    fsctl == FSCTL_REQUEST_BATCH_OPLOCK ||
-	    fsctl == FSCTL_REQUEST_FILTER_OPLOCK ||
-	    fsctl == FSCTL_REQUEST_OPLOCK_LEVEL_2 || oplock_request) {
-		if (shared_request) {
-			if (vnode_isreg(vp)) {
-				if (fFsRtlCheckLockForOplockRequest)
-					oplock_count =
-					    !fFsRtlCheckLockForOplockRequest(
-					    &vp->lock,
-					    &vp->FileHeader.AllocationSize);
-				else if
-				    (fFsRtlAreThereCurrentOrInProgressFileLocks)
-		oplock_count =
-		    fFsRtlAreThereCurrentOrInProgressFileLocks(&vp->lock);
-				else
-					oplock_count =
-					    FsRtlAreThereCurrentFileLocks(&vp->
-					    lock);
-			}
-		} else
-			oplock_count = vnode_iocount(vp);
-		}
+	//
+	// Is this an ACK path for v2 FSCTL_REQUEST_OPLOCK?
+	//
+	BOOLEAN isAck = FALSE;
+	if (fsctl == FSCTL_REQUEST_OPLOCK && buf) {
+		isAck = (buf->Flags & REQUEST_OPLOCK_INPUT_FLAG_ACK) ?
+		    TRUE : FALSE;
+	}
 
-		zfs_ccb_t *zccb = FileObject->FsContext2;
+	//
+	// Acquire per Microsoft's oplock sync guidance:
+	//  - Exclusive for request
+	//  - Shared for ACK
+	//
+	if (isAck) {
+		ExAcquireResourceSharedLite(vp->FileHeader.Resource, TRUE);
+	} else {
+		ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+	}
 
-		if (zccb != NULL &&
-		    zccb->magic == ZFS_CCB_MAGIC &&
-		    zccb->deleteonclose) {
+	ULONG fsctrlFlags = 0;
 
-			if ((fsctl == FSCTL_REQUEST_FILTER_OPLOCK ||
-			    fsctl == FSCTL_REQUEST_BATCH_OPLOCK ||
-			    (fsctl == FSCTL_REQUEST_OPLOCK &&
-			    buf->RequestedOplockLevel &
-			    OPLOCK_LEVEL_CACHE_HANDLE))) {
-				ExReleaseResourceLite(vp->FileHeader.Resource);
-				// ExReleaseResourceLite(&Vcb->tree_lock);
-				Status = STATUS_DELETE_PENDING;
-				goto out;
-			}
-		}
-
-	// This will complete the IRP as well.
-	// How to stop dispatcher from completing?
-	Status = FsRtlOplockFsctrl(vp_oplock(vp), Irp, oplock_count);
-	*PIrp = NULL; // Don't complete.
-
-	// *Pirp = NULL;
-
-	// fcb->Header.IsFastIoPossible = fast_io_possible(fcb);
+	Status = FsRtlOplockFsctrlEx(
+	    vp_oplock(vp),   // your FSRTL_OPLOCK*
+	    Irp,
+	    openCount,
+	    fsctrlFlags);
 
 	ExReleaseResourceLite(vp->FileHeader.Resource);
-	// ExReleaseResourceLite(&Vcb->tree_lock);
+
+	if (NT_SUCCESS(Status)) {
+		if (fsctl == FSCTL_REQUEST_OPLOCK) {
+			REQUEST_OPLOCK_INPUT_BUFFER *in =
+			    (REQUEST_OPLOCK_INPUT_BUFFER *)
+			    Irp->AssociatedIrp.SystemBuffer;
+			REQUEST_OPLOCK_OUTPUT_BUFFER *out =
+			    (REQUEST_OPLOCK_OUTPUT_BUFFER *)
+			    Irp->AssociatedIrp.SystemBuffer;
+
+			if (in && (in->Flags &
+			    REQUEST_OPLOCK_INPUT_FLAG_REQUEST) &&
+			    out &&
+			    out->NewOplockLevel != OPLOCK_LEVEL_CACHE_NONE) {
+				if (!zccb->HoldsOplock) {
+					atomic_inc_64(&vp->OplockRefCount);
+					zccb->HoldsOplock = B_TRUE;
+				}
+			} else if (in && (in->Flags &
+			    REQUEST_OPLOCK_INPUT_FLAG_ACK) &&
+			    out &&
+			    out->NewOplockLevel == OPLOCK_LEVEL_CACHE_NONE) {
+				if (zccb->HoldsOplock) {
+					zccb->HoldsOplock = B_FALSE;
+					atomic_dec_64(&vp->OplockRefCount);
+				}
+			}
+		} else {
+			// Legacy l1/l2/filter/batch requests: success == grant
+			switch (fsctl) {
+			case FSCTL_REQUEST_OPLOCK_LEVEL_1:
+			case FSCTL_REQUEST_OPLOCK_LEVEL_2:
+			case FSCTL_REQUEST_FILTER_OPLOCK:
+			case FSCTL_REQUEST_BATCH_OPLOCK:
+				if (!zccb->HoldsOplock) {
+					atomic_inc_64(&vp->OplockRefCount);
+					zccb->HoldsOplock = B_TRUE;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+	} else if (Status == STATUS_PENDING) {
+		// Don't bump here; grant isn't established yet.
+		// CLEANUP will backstop decrement if needed.
+	}
+
+	*PIrp = NULL; // FsRtl has completed it already
 
 out:
 	VN_RELE(vp);
 exit:
 	zfs_exit(zfsvfs, FTAG);
+
+	if (Status == STATUS_PENDING) {
+		// IoMarkIrpPending(Irp);
+	}
 
 	return (Status);
 }
@@ -4528,6 +4896,14 @@ user_fs_request(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		Status = create_or_get_object_id(DeviceObject, Irp, IrpSp);
 		break;
 	case FSCTL_REQUEST_OPLOCK:
+	case FSCTL_REQUEST_OPLOCK_LEVEL_1:
+	case FSCTL_REQUEST_OPLOCK_LEVEL_2:
+	case FSCTL_REQUEST_BATCH_OPLOCK:
+	case FSCTL_REQUEST_FILTER_OPLOCK:
+	case FSCTL_OPBATCH_ACK_CLOSE_PENDING:
+	case FSCTL_OPLOCK_BREAK_ACK_NO_2:
+	case FSCTL_OPLOCK_BREAK_ACKNOWLEDGE:
+	case FSCTL_OPLOCK_BREAK_NOTIFY:
 		dprintf("    FSCTL_REQUEST_OPLOCK: \n");
 		Status = request_oplock(DeviceObject, PIrp, IrpSp);
 		break;
@@ -5015,6 +5391,56 @@ set_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
 
 	Irp->IoStatus.Information = 0;
+
+	// OpLocks might need preflight checks.
+	BOOLEAN needsPreflight = FALSE;
+	switch (IrpSp->Parameters.SetFile.FileInformationClass) {
+	case FileEndOfFileInformation:
+	case FileAllocationInformation:
+	case FileValidDataLengthInformation:
+	{
+		uint64_t skip = (uint64_t)Irp->Tail.Overlay.DriverContext[0];
+		const BOOLEAN skipSetInfo =
+		    (skip == (OPLOCK_SKIP_MAGIC | OPLOCK_SKIP_SETINFO));
+		if (!skipSetInfo)
+			needsPreflight = TRUE;
+		break;
+	}
+	default:
+		break;
+	}
+
+	if (needsPreflight) {
+		PFILE_OBJECT FileObject = IrpSp->FileObject;
+		struct vnode *vp = FileObject->FsContext;
+
+		ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+
+		ZFS_OPLOCK_CREATE_CTX *ctx = ExAllocatePoolZero(NonPagedPoolNx,
+		    sizeof (*ctx), 'plkO');
+		if (!ctx) {
+			ExReleaseResourceLite(vp->FileHeader.Resource);
+			return (STATUS_INSUFFICIENT_RESOURCES);
+		}
+		ctx->DeviceObject = DeviceObject;
+		ctx->Irp = Irp;
+		ctx->SkipMask = OPLOCK_SKIP_SETINFO;
+
+		Status = FsRtlCheckOplockEx(vp_oplock(vp), Irp, 0, ctx,
+		    ZfsOplockCreatePostBreak, NULL);
+
+		ExReleaseResourceLite(vp->FileHeader.Resource);
+
+		if (Status == STATUS_PENDING) {
+			IoMarkIrpPending(Irp);
+			return (STATUS_PENDING);
+		}
+
+		ExFreePoolWithTag(ctx, 'plkO');
+
+		if (!NT_SUCCESS(Status))
+			return (Status);
+	}
 
 	switch (IrpSp->Parameters.SetFile.FileInformationClass) {
 	case FileAllocationInformation:
@@ -6748,7 +7174,11 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	// messages belonging to other devices.
 	fzmo = vp->v_mount;
 
-	FsRtlCheckOplock(vp_oplock(vp), Irp, NULL, NULL, NULL);
+	FsRtlCheckOplockEx(
+	    vp_oplock(vp),
+	    Irp,
+	    OPLOCK_FLAG_COMPLETE_IF_OPLOCKED,   // <- important
+	    NULL, NULL, NULL);
 
 	znode_t *zp = VTOZ(vp); // zp for notify removal
 
@@ -6757,6 +7187,10 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	    vp->v_iocount, vp->v_usecount);
 
 	// ExAcquireResourceSharedLite(&fcb->Vcb->tree_lock, true);
+	if (zccb && zccb->HoldsOplock) {
+		zccb->HoldsOplock = FALSE;
+		atomic_dec_64(&vp->OplockRefCount);
+	}
 
 	ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
 	locked = B_TRUE;
@@ -8163,9 +8597,9 @@ _Function_class_(DRIVER_DISPATCH)
 			break;
 			// FSCTL_QUERY_VOLUME_CONTAINER_STATE 0x90930
 		case IRP_MN_KERNEL_CALL:
-			dprintf("IRP_MN_KERNEL_CALL: unknown 0x%lx\n",
+			dprintf("IRP_MN_KERNEL_CALL: FsControlCode 0x%lx\n",
 			    IrpSp->Parameters.FileSystemControl.FsControlCode);
-			Status = STATUS_INVALID_DEVICE_REQUEST;
+			Status = user_fs_request(DeviceObject, PIrp, IrpSp);
 			break;
 		default:
 			dprintf("IRP_MJ_FILE_SYSTEM_CONTROL: unknown 0x%x\n",
@@ -8241,7 +8675,7 @@ _Function_class_(DRIVER_DISPATCH)
 		break;
 #endif
 	case IRP_MJ_LOCK_CONTROL:
-		Status = lock_control(DeviceObject, Irp, IrpSp);
+		Status = lock_control(DeviceObject, PIrp, IrpSp);
 		break;
 
 	case IRP_MJ_QUERY_INFORMATION:

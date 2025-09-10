@@ -3839,9 +3839,8 @@ set_file_endoffile_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		dprintf("truncating file to %I64x bytes\n", new_end_of_file);
 
-		if (FileObject->SectionObjectPointer &&
-		    !MmCanFileBeTruncated(
-		    FileObject->SectionObjectPointer,
+		if (!MmCanFileBeTruncated(
+		    &vp->SectionObjectPointers,
 		    &feofi->EndOfFile)) {
 			Status = STATUS_USER_MAPPED_FILE;
 			goto end;
@@ -4301,6 +4300,14 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		goto out;
 	}
 #endif
+	// May not rename over a file that is mmapped.
+	if (tvp &&
+	    !MmFlushImageSection(&tvp->SectionObjectPointers,
+	    MmFlushForWrite)) {
+		error = STATUS_ACCESS_DENIED;
+		goto out;
+	}
+
 	// Fetch parent, and hold
 	fdvp = zfs_parent(fvp);
 
@@ -6849,6 +6856,45 @@ fsctl_set_zero_data(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 //		WARN("insufficient privileges\n");
 //		return STATUS_ACCESS_DENIED;
 //	}
+
+	// OpLocks might need preflight checks.
+	BOOLEAN needsPreflight = FALSE;
+	uint64_t skip = (uint64_t)Irp->Tail.Overlay.DriverContext[0];
+	const BOOLEAN skipZeroData =
+	    (skip == (OPLOCK_SKIP_MAGIC | OPLOCK_SKIP_ZERODATA));
+	if (!skipZeroData)
+		needsPreflight = TRUE;
+
+	if (needsPreflight) {
+
+		ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+
+		ZFS_OPLOCK_CREATE_CTX *ctx = ExAllocatePoolZero(NonPagedPoolNx,
+		    sizeof (*ctx), 'plkO');
+		if (!ctx) {
+			ExReleaseResourceLite(vp->FileHeader.Resource);
+			return (STATUS_INSUFFICIENT_RESOURCES);
+		}
+		ctx->DeviceObject = DeviceObject;
+		ctx->Irp = Irp;
+		ctx->SkipMask = OPLOCK_SKIP_ZERODATA;
+
+		Status = FsRtlCheckOplockEx(vp_oplock(vp), Irp, 0, ctx,
+		    ZfsOplockCreatePostBreak, NULL);
+
+		ExReleaseResourceLite(vp->FileHeader.Resource);
+
+		if (Status == STATUS_PENDING) {
+			IoMarkIrpPending(Irp);
+			return (STATUS_PENDING);
+		}
+
+		ExFreePoolWithTag(ctx, 'plkO');
+
+		if (!NT_SUCCESS(Status))
+			return (Status);
+	}
+
 
 	znode_t *zp = VTOZ(vp);
 
