@@ -154,11 +154,11 @@ static unsigned int zfs_xattr_compat = 0;
 int
 xattr_protected(const char *name)
 {
-	if (strcmp(EA_NTACL, name) == 0)
+	if (strcasecmp(EA_NTACL, name) == 0)
 		return (1);
 
 	if ((strncmp(XATTR_USER_PREFIX, name, XATTR_USER_PREFIX_LEN) == 0) &&
-	    (strcmp(EA_NTACL, &name[XATTR_USER_PREFIX_LEN]) == 0))
+	    (strcasecmp(EA_NTACL, &name[XATTR_USER_PREFIX_LEN]) == 0))
 		return (1);
 
 	return (0);
