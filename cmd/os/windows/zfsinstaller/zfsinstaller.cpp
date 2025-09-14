@@ -356,6 +356,10 @@ perf_counters(char *inf_path, int type)
 	char *slash = strrchr(driver_path, '\\');
 	if (slash)
 		*slash = '\0';
+	else  
+		slash = strrchr(driver_path, '/');
+	if (slash)
+		*slash = '\0';
 
 	if (path.is_absolute())
 		final_path = std::string(driver_path) + MANIFEST_FILE;
@@ -396,7 +400,7 @@ perf_counters_uninstall(char *inf_path)
 int
 main(int argc, char *argv[])
 {
-	bool zed_service = FALSE;
+	int ret = 0;
 
 	if (argc < 2) {
 		fprintf(stderr, "too few arguments \n");
@@ -410,55 +414,60 @@ main(int argc, char *argv[])
 	}
 
 	// ew manual arg parsing when we have getopt?
+
+	// Always uninstall, even for install.
+	bool do_uninstall = false;
+	bool do_install = false;
+	bool zed_service = false;
+
+	if (strcmp(argv[1], "uninstall") == 0) {
+		do_uninstall = true;
+	}
+
 	if (strcmp(argv[1], "install") == 0) {
+		do_uninstall = true;
+		do_install = true;
+	}
 
-		if ((argc == 5) && strcmp(argv[2], "-z") == 0) {
-				zed_service = TRUE;
-				argv++;
-				argc--;
-		}
-
-		if (argc == 4) {
-#if 1
-			printf("[1/4] Cleaning up extra installs of OpenZFS and OpenZVOL\n");
-			clean_extra_installs();
-			CleanupOpenZFSDriverPackages();
-			printf("[4/4] Completed.\n");
-
-			zfs_install(argv[2]);
-#endif
-			zvol_install(argv[3]);
-			if (zed_service)
-				install_zed();
-
-			fprintf(stderr, "Installation done.");
-		} else {
-			fprintf(stderr, "Incorrect argument usage\n");
-			printUsage();
-			return (ERROR_BAD_ARGUMENTS);
-		}
-	} else if (strcmp(argv[1], "uninstall") == 0) {
-
+	if (do_uninstall || do_install) {
 		if ((argc == 5) && strcmp(argv[2], "-z") == 0) {
 			zed_service = TRUE;
 			argv++;
 			argc--;
 		}
+	}
 
+	if (do_uninstall) {
 		if (argc == 4) {
+			if (zed_service)
+				uninstall_zed();
 			int ret = zfs_uninstall(argv[2]);
 			if (0 == ret)
 				ret = zvol_uninstall(argv[3]);
 			if (0 == ret)
 				zfs_log_session_delete();
-			if (zed_service)
-				uninstall_zed();
 			printf("[1/4] Cleaning up extra installs of OpenZFS and OpenZVOL\n");
 			clean_extra_installs();
 			CleanupOpenZFSDriverPackages();
 			printf("[4/4] Completed.\n");
+		} else {
+			fprintf(stderr, "Incorrect argument usage\n");
+			printUsage();
+			return (ERROR_BAD_ARGUMENTS);
+		}
+	}
 
-			return (ret);
+	if (do_install) {
+
+		if (do_uninstall)
+			sleep(5);
+
+		if (argc == 4) {
+			zfs_install(argv[2]);
+			zvol_install(argv[3]);
+			if (zed_service)
+				install_zed();
+			fprintf(stderr, "Installation done.");
 		} else {
 			fprintf(stderr, "Incorrect argument usage\n");
 			printUsage();
@@ -474,7 +483,8 @@ main(int argc, char *argv[])
 		printUsage();
 		return (ERROR_BAD_ARGUMENTS);
 	}
-	return (0);
+
+	return (ret);
 }
 
 void
@@ -610,6 +620,168 @@ installRootDevice(char *inf, bool IsServiceRunning, const char *rootdev)
 
 	return (failcode);
 }
+
+DWORD
+installRootDeviceY(char *infAnsi, bool /*IsServiceRunning*/, const char *rootdevAnsi)
+{
+	// ---- 0) Convert inputs & pre-stage the INF ----
+	std::wstring infW, rootdevW;
+	{
+		int n1 = MultiByteToWideChar(CP_UTF8, 0, infAnsi, -1, nullptr, 0);
+		infW.resize(n1 ? n1 - 1 : 0);
+		if (n1 && !infW.empty()) MultiByteToWideChar(CP_UTF8, 0, infAnsi, -1, &infW[0], n1);
+
+		int n2 = MultiByteToWideChar(CP_UTF8, 0, rootdevAnsi, -1, nullptr, 0);
+		rootdevW.resize(n2 ? n2 - 1 : 0);
+		if (n2 && !rootdevW.empty()) MultiByteToWideChar(CP_UTF8, 0, rootdevAnsi, -1, &rootdevW[0], n2);
+	}
+
+	WCHAR oemInfPath[MAX_PATH] = {};
+	if (!SetupCopyOEMInfW(infW.c_str(), nullptr, SPOST_NONE, 0,
+		oemInfPath, ARRAYSIZE(oemInfPath),
+		nullptr, nullptr)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupCopyOEMInfW failed: 0x%lx\n", err);
+		return err;
+	}
+
+	// ---- 1) Read class from the INF (should be System) & create a DI list ----
+	GUID classGuid{};
+	WCHAR className[MAX_CLASS_NAME_LEN] = {};
+	if (!SetupDiGetINFClassW(infW.c_str(), &classGuid, className, ARRAYSIZE(className), nullptr)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiGetINFClassW failed: 0x%lx\n", err);
+		return err;
+	}
+
+	HDEVINFO hdi = SetupDiCreateDeviceInfoList(&classGuid, nullptr);
+	if (hdi == INVALID_HANDLE_VALUE) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiCreateDeviceInfoList failed: 0x%lx\n", err);
+		return err;
+	}
+
+	// ---- 2) Try to find an existing devnode with HardwareId == rootdev ----
+	SP_DEVINFO_DATA dev{ sizeof(dev) };
+	bool haveExisting = false;
+
+	// Enumerate all devices of this class and look for our HardwareId
+	HDEVINFO hEnum = SetupDiGetClassDevsW(&classGuid, nullptr, nullptr, 0);
+	if (hEnum != INVALID_HANDLE_VALUE) {
+		for (DWORD i = 0;; ++i) {
+			SP_DEVINFO_DATA it{ sizeof(it) };
+			if (!SetupDiEnumDeviceInfo(hEnum, i, &it))
+				break;
+
+			// Read SPDRP_HARDWAREID (MULTI_SZ)
+			WCHAR hwids[256] = {};
+			if (SetupDiGetDeviceRegistryPropertyW(hEnum, &it, SPDRP_HARDWAREID, nullptr,
+				reinterpret_cast<PBYTE>(hwids),
+				sizeof(hwids), nullptr)) {
+				// MULTI_SZ; compare case-insensitively against rootdevW
+				for (const WCHAR *p = hwids; *p; p += (wcslen(p) + 1)) {
+					if (_wcsicmp(p, rootdevW.c_str()) == 0) {
+						// Get instance ID and open this dev into our hdi
+						WCHAR instId[256] = {};
+						if (SetupDiGetDeviceInstanceIdW(hEnum, &it, instId, ARRAYSIZE(instId), nullptr)) {
+							if (SetupDiOpenDeviceInfoW(hdi, instId, nullptr, 0, &dev)) {
+								haveExisting = true;
+							}
+						}
+						break;
+					}
+				}
+			}
+			if (haveExisting) break;
+		}
+		SetupDiDestroyDeviceInfoList(hEnum);
+	}
+
+	// ---- 3) Create/register only if not found ----
+	if (!haveExisting) {
+		if (!SetupDiCreateDeviceInfoW(hdi, className, &classGuid, L"OpenZFS",
+			nullptr, DICD_GENERATE_ID, &dev)) {
+			DWORD err = GetLastError();
+			fprintf(stderr, "SetupDiCreateDeviceInfoW failed: 0x%lx\n", err);
+			SetupDiDestroyDeviceInfoList(hdi);
+			return err;
+		}
+
+		// HardwareIds = "ROOT\\OpenZFS\0\0"
+		std::wstring hwidMulti = rootdevW;          // e.g. L"ROOT\\OpenZFS"
+		hwidMulti.push_back(L'\0');                 // MULTI_SZ extra terminator
+		if (!SetupDiSetDeviceRegistryPropertyW(hdi, &dev, SPDRP_HARDWAREID,
+			reinterpret_cast<const BYTE *>(hwidMulti.c_str()),
+			static_cast<DWORD>((hwidMulti.size() + 1) * sizeof(WCHAR)))) {
+			DWORD err = GetLastError();
+			fprintf(stderr, "Set SPDRP_HARDWAREID failed: 0x%lx\n", err);
+			SetupDiDestroyDeviceInfoList(hdi);
+			return err;
+		}
+
+		(void)SetupDiSetDeviceRegistryPropertyW(hdi, &dev, SPDRP_FRIENDLYNAME,
+			reinterpret_cast<const BYTE *>(L"OpenZFS"),
+			DWORD((wcslen(L"OpenZFS") + 1) * sizeof(WCHAR)));
+
+		if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, hdi, &dev)) {
+			DWORD err = GetLastError();
+			fprintf(stderr, "DIF_REGISTERDEVICE failed: 0x%lx\n", err);
+			SetupDiDestroyDeviceInfoList(hdi);
+			return err;
+		}
+	}
+
+	// (Optional) dump the instance id we’re working on
+	{
+		WCHAR instId[256];
+		if (SetupDiGetDeviceInstanceIdW(hdi, &dev, instId, ARRAYSIZE(instId), nullptr)) {
+			fwprintf(stderr, L"OpenZFS devinst: %s%s\n", instId, haveExisting ? L" (existing)" : L" (created)");
+		}
+	}
+
+	// ---- 4) Constrain selection to *this* oemXX.inf and bind it ----
+	SP_DEVINSTALL_PARAMS_W dip{ sizeof(dip) };
+	if (!SetupDiGetDeviceInstallParamsW(hdi, &dev, &dip)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiGetDeviceInstallParamsW failed: 0x%lx\n", err);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return err;
+	}
+	dip.Flags |= DI_ENUMSINGLEINF;
+	wcsncpy_s(dip.DriverPath, oemInfPath, _TRUNCATE);
+	if (!SetupDiSetDeviceInstallParamsW(hdi, &dev, &dip)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiSetDeviceInstallParamsW failed: 0x%lx\n", err);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return err;
+	}
+
+	if (!SetupDiBuildDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiBuildDriverInfoList failed: 0x%lx\n", err);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return err;
+	}
+	if (!SetupDiSelectBestCompatDrv(hdi, &dev)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiSelectBestCompatDrv failed: 0x%lx\n", err);
+		SetupDiDestroyDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return err ? err : ERROR_NO_DRIVER_SELECTED;
+	}
+	if (!SetupDiInstallDevice(hdi, &dev)) {
+		DWORD err = GetLastError();
+		fprintf(stderr, "SetupDiInstallDevice failed: 0x%lx\n", err);
+		SetupDiDestroyDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER);
+		SetupDiDestroyDeviceInfoList(hdi);
+		return err;
+	}
+
+	SetupDiDestroyDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER);
+	SetupDiDestroyDeviceInfoList(hdi);
+	return ERROR_SUCCESS;
+}
+
 
 static DWORD
 Utf8ToWide(std::wstring &out, const char *in)

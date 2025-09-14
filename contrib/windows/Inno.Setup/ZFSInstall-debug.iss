@@ -119,6 +119,10 @@ Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.inf"
 Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
 
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
+[UninstallDelete]
+Type: files; Name: "{app}\zed.pid"
+Type: files; Name: "{app}\zed.state"
+Type: files; Name: "{app}\cbuf.txt"
 
 [Icons]
 Name: "{group}\{cm:ProgramOnTheWeb,{#MyAppName}}"; Filename: "{#MyAppURL}"
