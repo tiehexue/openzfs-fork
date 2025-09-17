@@ -87,6 +87,8 @@ void clean_extra_installs(void);
 void CleanupOpenZFSDriverPackages(void);
 bool install_zed(void);
 bool uninstall_zed(void);
+int zfs_preflight(void);
+int zfs_postflight(void);
 
 int
 session_exists(void)
@@ -473,11 +475,22 @@ main(int argc, char *argv[])
 			printUsage();
 			return (ERROR_BAD_ARGUMENTS);
 		}
-	} else if (strcmp(argv[1], "trace") == 0) {
+	}
+
+	if (strcmp(argv[1], "trace") == 0) {
 		if (argc == 3 && strcmp(argv[2], "-d") == 0)
 			return (zfs_log_session_delete());
 		else
 			return (zfs_log_session_create(argc - 1, &argv[1]));
+
+	} else if (strcmp(argv[1], "preflight") == 0) {
+
+		ret = zfs_preflight();
+
+	} else if (strcmp(argv[1], "postflight") == 0) {
+
+		ret = zfs_postflight();
+
 	} else {
 		fprintf(stderr, "unknown argument %s\n", argv[1]);
 		printUsage();
@@ -488,7 +501,8 @@ main(int argc, char *argv[])
 }
 
 void
-printUsage() {
+printUsage()
+{
 	fprintf(stderr, "\nUsage:\n\n");
 	fprintf(stderr, "Install driver per INF DefaultInstall section:\n");
 	fprintf(stderr, "zfsinstaller install [-z] OpenZFS.inf OpenZVOL.inf\n");
@@ -620,168 +634,6 @@ installRootDevice(char *inf, bool IsServiceRunning, const char *rootdev)
 
 	return (failcode);
 }
-
-DWORD
-installRootDeviceY(char *infAnsi, bool /*IsServiceRunning*/, const char *rootdevAnsi)
-{
-	// ---- 0) Convert inputs & pre-stage the INF ----
-	std::wstring infW, rootdevW;
-	{
-		int n1 = MultiByteToWideChar(CP_UTF8, 0, infAnsi, -1, nullptr, 0);
-		infW.resize(n1 ? n1 - 1 : 0);
-		if (n1 && !infW.empty()) MultiByteToWideChar(CP_UTF8, 0, infAnsi, -1, &infW[0], n1);
-
-		int n2 = MultiByteToWideChar(CP_UTF8, 0, rootdevAnsi, -1, nullptr, 0);
-		rootdevW.resize(n2 ? n2 - 1 : 0);
-		if (n2 && !rootdevW.empty()) MultiByteToWideChar(CP_UTF8, 0, rootdevAnsi, -1, &rootdevW[0], n2);
-	}
-
-	WCHAR oemInfPath[MAX_PATH] = {};
-	if (!SetupCopyOEMInfW(infW.c_str(), nullptr, SPOST_NONE, 0,
-		oemInfPath, ARRAYSIZE(oemInfPath),
-		nullptr, nullptr)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupCopyOEMInfW failed: 0x%lx\n", err);
-		return err;
-	}
-
-	// ---- 1) Read class from the INF (should be System) & create a DI list ----
-	GUID classGuid{};
-	WCHAR className[MAX_CLASS_NAME_LEN] = {};
-	if (!SetupDiGetINFClassW(infW.c_str(), &classGuid, className, ARRAYSIZE(className), nullptr)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiGetINFClassW failed: 0x%lx\n", err);
-		return err;
-	}
-
-	HDEVINFO hdi = SetupDiCreateDeviceInfoList(&classGuid, nullptr);
-	if (hdi == INVALID_HANDLE_VALUE) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiCreateDeviceInfoList failed: 0x%lx\n", err);
-		return err;
-	}
-
-	// ---- 2) Try to find an existing devnode with HardwareId == rootdev ----
-	SP_DEVINFO_DATA dev{ sizeof(dev) };
-	bool haveExisting = false;
-
-	// Enumerate all devices of this class and look for our HardwareId
-	HDEVINFO hEnum = SetupDiGetClassDevsW(&classGuid, nullptr, nullptr, 0);
-	if (hEnum != INVALID_HANDLE_VALUE) {
-		for (DWORD i = 0;; ++i) {
-			SP_DEVINFO_DATA it{ sizeof(it) };
-			if (!SetupDiEnumDeviceInfo(hEnum, i, &it))
-				break;
-
-			// Read SPDRP_HARDWAREID (MULTI_SZ)
-			WCHAR hwids[256] = {};
-			if (SetupDiGetDeviceRegistryPropertyW(hEnum, &it, SPDRP_HARDWAREID, nullptr,
-				reinterpret_cast<PBYTE>(hwids),
-				sizeof(hwids), nullptr)) {
-				// MULTI_SZ; compare case-insensitively against rootdevW
-				for (const WCHAR *p = hwids; *p; p += (wcslen(p) + 1)) {
-					if (_wcsicmp(p, rootdevW.c_str()) == 0) {
-						// Get instance ID and open this dev into our hdi
-						WCHAR instId[256] = {};
-						if (SetupDiGetDeviceInstanceIdW(hEnum, &it, instId, ARRAYSIZE(instId), nullptr)) {
-							if (SetupDiOpenDeviceInfoW(hdi, instId, nullptr, 0, &dev)) {
-								haveExisting = true;
-							}
-						}
-						break;
-					}
-				}
-			}
-			if (haveExisting) break;
-		}
-		SetupDiDestroyDeviceInfoList(hEnum);
-	}
-
-	// ---- 3) Create/register only if not found ----
-	if (!haveExisting) {
-		if (!SetupDiCreateDeviceInfoW(hdi, className, &classGuid, L"OpenZFS",
-			nullptr, DICD_GENERATE_ID, &dev)) {
-			DWORD err = GetLastError();
-			fprintf(stderr, "SetupDiCreateDeviceInfoW failed: 0x%lx\n", err);
-			SetupDiDestroyDeviceInfoList(hdi);
-			return err;
-		}
-
-		// HardwareIds = "ROOT\\OpenZFS\0\0"
-		std::wstring hwidMulti = rootdevW;          // e.g. L"ROOT\\OpenZFS"
-		hwidMulti.push_back(L'\0');                 // MULTI_SZ extra terminator
-		if (!SetupDiSetDeviceRegistryPropertyW(hdi, &dev, SPDRP_HARDWAREID,
-			reinterpret_cast<const BYTE *>(hwidMulti.c_str()),
-			static_cast<DWORD>((hwidMulti.size() + 1) * sizeof(WCHAR)))) {
-			DWORD err = GetLastError();
-			fprintf(stderr, "Set SPDRP_HARDWAREID failed: 0x%lx\n", err);
-			SetupDiDestroyDeviceInfoList(hdi);
-			return err;
-		}
-
-		(void)SetupDiSetDeviceRegistryPropertyW(hdi, &dev, SPDRP_FRIENDLYNAME,
-			reinterpret_cast<const BYTE *>(L"OpenZFS"),
-			DWORD((wcslen(L"OpenZFS") + 1) * sizeof(WCHAR)));
-
-		if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, hdi, &dev)) {
-			DWORD err = GetLastError();
-			fprintf(stderr, "DIF_REGISTERDEVICE failed: 0x%lx\n", err);
-			SetupDiDestroyDeviceInfoList(hdi);
-			return err;
-		}
-	}
-
-	// (Optional) dump the instance id we’re working on
-	{
-		WCHAR instId[256];
-		if (SetupDiGetDeviceInstanceIdW(hdi, &dev, instId, ARRAYSIZE(instId), nullptr)) {
-			fwprintf(stderr, L"OpenZFS devinst: %s%s\n", instId, haveExisting ? L" (existing)" : L" (created)");
-		}
-	}
-
-	// ---- 4) Constrain selection to *this* oemXX.inf and bind it ----
-	SP_DEVINSTALL_PARAMS_W dip{ sizeof(dip) };
-	if (!SetupDiGetDeviceInstallParamsW(hdi, &dev, &dip)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiGetDeviceInstallParamsW failed: 0x%lx\n", err);
-		SetupDiDestroyDeviceInfoList(hdi);
-		return err;
-	}
-	dip.Flags |= DI_ENUMSINGLEINF;
-	wcsncpy_s(dip.DriverPath, oemInfPath, _TRUNCATE);
-	if (!SetupDiSetDeviceInstallParamsW(hdi, &dev, &dip)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiSetDeviceInstallParamsW failed: 0x%lx\n", err);
-		SetupDiDestroyDeviceInfoList(hdi);
-		return err;
-	}
-
-	if (!SetupDiBuildDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiBuildDriverInfoList failed: 0x%lx\n", err);
-		SetupDiDestroyDeviceInfoList(hdi);
-		return err;
-	}
-	if (!SetupDiSelectBestCompatDrv(hdi, &dev)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiSelectBestCompatDrv failed: 0x%lx\n", err);
-		SetupDiDestroyDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER);
-		SetupDiDestroyDeviceInfoList(hdi);
-		return err ? err : ERROR_NO_DRIVER_SELECTED;
-	}
-	if (!SetupDiInstallDevice(hdi, &dev)) {
-		DWORD err = GetLastError();
-		fprintf(stderr, "SetupDiInstallDevice failed: 0x%lx\n", err);
-		SetupDiDestroyDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER);
-		SetupDiDestroyDeviceInfoList(hdi);
-		return err;
-	}
-
-	SetupDiDestroyDriverInfoList(hdi, &dev, SPDIT_CLASSDRIVER);
-	SetupDiDestroyDeviceInfoList(hdi);
-	return ERROR_SUCCESS;
-}
-
 
 static DWORD
 Utf8ToWide(std::wstring &out, const char *in)
@@ -1395,7 +1247,8 @@ clean_extra_installs(void)
 }
 
 
-bool hasOpenZFSInstallConfig(HKEY hKey)
+bool
+hasOpenZFSInstallConfig(HKEY hKey)
 {
 	DWORD type = 0;
 	DWORD dataSize = 0;
@@ -1584,4 +1437,192 @@ uninstall_zed()
 	DeleteFileA("C:\\Program Files\\OpenZFS on Windows\\zed.txt");
 
 	return true;
+}
+
+static
+DWORD RunHidden(const std::wstring &exe, const std::wstring &args)
+{
+	std::wstring cmd = L"\"" + exe + L"\" " + args;
+	STARTUPINFOW si{}; si.cb = sizeof (si);
+	PROCESS_INFORMATION pi{};
+	DWORD ret = 0;
+	DWORD flags = CREATE_UNICODE_ENVIRONMENT;
+//	flags |= CREATE_NO_WINDOW;
+	if (!CreateProcessW(nullptr, (LPWSTR) cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi))
+		return GetLastError();
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	GetExitCodeProcess(pi.hProcess, &ret);
+	CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+	printf("Ran: %ls, exit %lu\n", cmd.c_str(), ret);
+	return (ret);
+}
+
+DWORD
+RunHiddenCapture(const std::wstring &app,
+	const std::wstring &args,
+	std::wstring &output,
+	size_t &line_count,
+	DWORD timeout_ms = INFINITE)
+{
+	SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+	HANDLE hRead = nullptr, hWrite = nullptr;
+	if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+		return GetLastError();
+	// child must not inherit the read end
+	SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+	STARTUPINFOW si{};
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+	si.wShowWindow = SW_HIDE;
+	si.hStdInput = NULL;
+	si.hStdOutput = hWrite;
+	si.hStdError = hWrite;
+
+	PROCESS_INFORMATION pi{};
+	// Build mutable command line: "app.exe" + space + args
+	std::wstring cmd = L"\"" + app + L"\"";
+	if (!args.empty()) { cmd += L" "; cmd += args; }
+	std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+	cmdBuf.push_back(L'\0');
+
+	BOOL ok = CreateProcessW(
+		/*lpApplicationName*/ nullptr,           // use command line
+		/*lpCommandLine   */ cmdBuf.data(),
+		/*lpProcessAttr   */ nullptr,
+		/*lpThreadAttr    */ nullptr,
+		/*bInheritHandles */ TRUE,
+		/*dwCreationFlags */ CREATE_NO_WINDOW,
+		/*lpEnvironment   */ nullptr,
+		/*lpCurrentDir    */ nullptr,
+		/*lpStartupInfo   */ &si,
+		/*lpProcessInfo   */ &pi);
+
+	CloseHandle(hWrite); // parent must close its write end ASAP
+	if (!ok) {
+		CloseHandle(hRead);
+		return GetLastError();
+	}
+
+	// Read the entire stream
+	std::string raw;
+	raw.reserve(1024);
+	for (;;) {
+		char buf[4096];
+		DWORD got = 0;
+		BOOL r = ReadFile(hRead, buf, sizeof(buf), &got, nullptr);
+		if (!r) {
+			if (GetLastError() == ERROR_BROKEN_PIPE) break; // child closed
+			else break; // treat other errors as stream end
+		}
+		if (got) raw.append(buf, buf + got);
+	}
+
+	// Wait for process and get exit code
+	WaitForSingleObject(pi.hProcess, timeout_ms);
+	DWORD ec = 0;
+	if (!GetExitCodeProcess(pi.hProcess, &ec))
+		ec = DWORD(-1);
+
+	CloseHandle(hRead);
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+
+	// Normalize newlines for counting: just count '\n'
+	size_t lines = 0;
+	for (char c : raw)
+		if (c == '\n')
+			++lines;
+	// If there’s non-empty output without a trailing '\n', count the last line
+	if (!raw.empty() && raw.back() != '\n')
+		++lines;
+
+	Utf8ToWide(output, raw.c_str());
+	line_count = lines;
+	return (ec);
+}
+
+
+/*
+ * Check if zpool.exe command exists
+ * Check if pool(s) are imported
+ * Attempt exporting, save zpool.cache if needed
+ */
+int
+zfs_preflight(void)
+{
+	int ret;
+
+	const std::wstring zpool = L"C:\\Program Files\\OpenZFS On Windows\\zpool.exe";
+	std::wstring output;
+	size_t lines = 0;
+	ret = RunHiddenCapture(zpool, L"list -H -o name", output, lines);
+	if (ret) {
+		printf("Preflight OK, ZFS not installed/loaded. (result %d)\n", ret);
+		return (0);
+	}
+
+	if (lines == 0) {
+		printf("Preflight OK, no pools imported.\n");
+		return (0);
+	}
+
+	printf("Preflight: found %zu imported pool(s)\n", lines);
+
+	// Copy the zpool.cache file if it exists
+	const std::wstring cacheSrc = L"C:\\Windows\\System32\\drivers\\zpool.cache";
+	const std::wstring cacheDst = L"C:\\Windows\\System32\\drivers\\zpool.cache.installer";
+	if (GetFileAttributesW(cacheSrc.c_str()) != INVALID_FILE_ATTRIBUTES) {
+		if (CopyFileW(cacheSrc.c_str(), cacheDst.c_str(), FALSE)) {
+			printf("Saved zpool.cache to %ls\n", cacheDst.c_str());
+		} else {
+			printf("Failed to save zpool.cache: %lu\n", GetLastError());
+		}
+	} else {
+		printf("No zpool.cache file found, skipping save.\n");
+	}
+
+
+	printf("Attempting to export all pools...\n");
+	fflush(stdout);
+
+	ret = RunHiddenCapture(zpool, L"export -a", output, lines);
+
+	if (ret) {
+		printf("Preflight FAILED: Failed to export pools, please export manually and retry. (result %d)\n", ret);
+		return (1);
+	}
+
+	// Restore back the zpool.cache copy
+	if (GetFileAttributesW(cacheDst.c_str()) != INVALID_FILE_ATTRIBUTES) {
+		if (CopyFileW(cacheDst.c_str(), cacheSrc.c_str(), FALSE)) {
+			printf("Restored zpool.cache from %ls\n", cacheDst.c_str());
+			DeleteFileW(cacheDst.c_str());
+		} else {
+			printf("Failed to restore zpool.cache: %lu\n", GetLastError());
+		}
+	}
+
+	printf("Preflight OK: Pool(s) exported.\n");
+	return (0);
+}
+
+int
+zfs_postflight(void)
+{
+	// If zpool.cache exists, attempt to (re-)import pools
+	const std::wstring cacheFile = L"C:\\Windows\\System32\\drivers\\zpool.cache";
+	if (GetFileAttributesW(cacheFile.c_str()) == INVALID_FILE_ATTRIBUTES) {
+
+		printf("No zpool.cache file found, skipping import.\n");
+		return (0);
+	}
+	printf("Postflight: zpool.cache found, attempting to import pools...\n");
+
+	const std::wstring zpool = L"C:\\Program Files\\OpenZFS On Windows\\zpool.exe";
+	std::wstring output;
+	size_t lines = 0;
+	int ret = RunHiddenCapture(zpool, L"import -a -c C:\\Windows\\System32\\drivers\\zpool.cache", output, lines);
+	printf("Postflight: done.\n");
+	return (0);
 }

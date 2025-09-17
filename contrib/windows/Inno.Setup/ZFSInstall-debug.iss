@@ -68,8 +68,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-    if (CurStep = ssPostInstall) and WizardIsTaskSelected('envPath')
-    then EnvAddPath(ExpandConstant('{app}'));
+    if (CurStep = ssPostInstall) then
+    begin
+      if (WizardIsTaskSelected('envPath')) then
+      begin
+        EnvAddPath(ExpandConstant('{app}'));
+      end;
+    
+      ExePath := ExpandConstant('{app}\zfsinstaller.exe');
+      if FileExists(ExePath) then
+      begin
+        Ok := ExecHiddenWait(ExePath, 'postflight', '', Code);
+      end;
+    end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -77,6 +88,80 @@ begin
     if CurUninstallStep = usPostUninstall
     then EnvRemovePath(ExpandConstant('{app}'));
 end;
+
+function RunPreflightAndFailIfNeeded(): Boolean;
+var
+  ExePath: string;
+  ResultCode: Integer;
+  Ok: Boolean;
+begin
+  // Make the bundled exe available in {tmp}
+  ExtractTemporaryFile('zfsinstaller.exe');
+  ExePath := ExpandConstant('{tmp}\zfsinstaller.exe');
+
+  // Optional: add args like "preflight --attempt-export --quiet"
+  Ok := Exec(ExePath, 'preflight', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not Ok then
+  begin
+    SuppressibleMsgBox(
+      'Failed to run preflight (zfsinstaller.exe). Installation cannot continue.',
+      mbCriticalError, MB_OK, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  // Your preflight contract:
+  //  0  = OK to proceed (no pools, or successfully exported)
+  // !=0 = Pools are imported and could not be auto-exported (user action needed)
+  if ResultCode <> 0 then
+  begin
+    // Keep this message crisp; users will see it right before install begins
+    SuppressibleMsgBox(
+      'OpenZFS preflight check detected imported pools.'#13#10+
+      'Please export all pools (e.g. "zpool export -a") and run the installer again.',
+      mbCriticalError, MB_OK, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  Result := True;
+end;
+
+// Called right before files are installed. Return a non-empty string to abort.
+function PrepareToInstall(var NeedsRestart: Boolean): string;
+begin
+  if not RunPreflightAndFailIfNeeded() then
+    Result := 'Preflight checks failed. Pools are still imported.'
+  else
+    Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+var ExePath: string; Code: Integer; Ok: Boolean;
+begin
+  Result := True;  // default allow
+  ExePath := ExpandConstant('{app}\zfsinstaller.exe');
+
+  if FileExists(ExePath) then
+  begin
+    Ok := ExecHiddenWait(ExePath, 'preflight', '', Code);
+    if not Ok then
+    begin
+      SuppressibleMsgBox('Failed to run pre-uninstall preflight (zfsinstaller.exe).', mbCriticalError, MB_OK, MB_OK);
+      Result := False; Exit;
+    end;
+
+    if Code <> 0 then
+    begin
+      SuppressibleMsgBox(
+        'Uninstall preflight detected imported pools or couldn’t safely export them.'#13#10+
+        'Please export all pools (e.g. "zpool export -a") and retry uninstall.',
+        mbCriticalError, MB_OK, MB_OK);
+      Result := False; Exit;
+    end;
+  end;
+end;
+
 
 [Tasks]
 Name: envPath; Description: "Add OpenZFS to PATH variable"
