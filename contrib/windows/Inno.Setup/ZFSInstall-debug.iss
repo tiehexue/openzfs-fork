@@ -66,7 +66,14 @@ SetupLogging=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Code]
+function ExecHiddenWait(const FileName, Params, WorkingDir: string; var ExitCode: Integer): Boolean;
+begin
+  // SW_HIDE or SW_SHOW
+  Result := Exec(FileName, Params, WorkingDir, SW_SHOW, ewWaitUntilTerminated, ExitCode);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
+var ExePath: string; Code: Integer; Ok: Boolean;
 begin
     if (CurStep = ssPostInstall) then
     begin
@@ -100,7 +107,8 @@ begin
   ExePath := ExpandConstant('{tmp}\zfsinstaller.exe');
 
   // Optional: add args like "preflight --attempt-export --quiet"
-  Ok := Exec(ExePath, 'preflight', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // SW_HIDE or SW_SHOW
+  Ok := Exec(ExePath, 'preflight', '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
   if not Ok then
   begin
     SuppressibleMsgBox(

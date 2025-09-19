@@ -72,7 +72,6 @@ AddService  = %ServiceName%,2,OpenZFS.Service
 
 [DefaultUninstall]
 UnregisterDlls = shellopenzfs
-DelFiles   = OpenZFS.DriverFiles
 ;;,OpenZFS.DllFiles
 
 [DefaultUninstall.Services]

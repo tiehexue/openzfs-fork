@@ -90,6 +90,8 @@ bool uninstall_zed(void);
 int zfs_preflight(void);
 int zfs_postflight(void);
 
+bool reboot_indicated = false;
+
 int
 session_exists(void)
 {
@@ -433,7 +435,7 @@ main(int argc, char *argv[])
 
 	if (do_uninstall || do_install) {
 		if ((argc == 5) && strcmp(argv[2], "-z") == 0) {
-			zed_service = TRUE;
+			zed_service = true;
 			argv++;
 			argc--;
 		}
@@ -443,14 +445,55 @@ main(int argc, char *argv[])
 		if (argc == 4) {
 			if (zed_service)
 				uninstall_zed();
+
 			int ret = zfs_uninstall(argv[2]);
 			if (0 == ret)
 				ret = zvol_uninstall(argv[3]);
 			if (0 == ret)
 				zfs_log_session_delete();
+
+			for (int timeout = 0; timeout < 20; timeout++) {
+				// Wait for the service to stop
+				SC_HANDLE schSCManager = OpenSCManager(
+					NULL, NULL, SC_MANAGER_CONNECT);
+				if (schSCManager == NULL)
+					break;
+				SC_HANDLE schService = OpenServiceA(
+					schSCManager, "OpenZFS",
+					SERVICE_QUERY_STATUS);
+				if (schService == NULL) {
+					CloseServiceHandle(schSCManager);
+					break;
+				}
+				SERVICE_STATUS_PROCESS ssStatus;
+				DWORD dwBytesNeeded;
+				if (!QueryServiceStatusEx(
+					schService,
+					SC_STATUS_PROCESS_INFO,
+					(LPBYTE)&ssStatus,
+					sizeof(SERVICE_STATUS_PROCESS),
+					&dwBytesNeeded)) {
+					CloseServiceHandle(schService);
+					CloseServiceHandle(schSCManager);
+					break;
+				}
+				if (ssStatus.dwCurrentState ==
+					SERVICE_STOPPED) {
+					CloseServiceHandle(schService);
+					CloseServiceHandle(schSCManager);
+					break;
+				}
+				CloseServiceHandle(schService);
+				CloseServiceHandle(schSCManager);
+				fprintf(stderr,
+					"Waiting for OpenZFS service to stop...\n");
+				sleep(1);
+			}
+
 			printf("[1/4] Cleaning up extra installs of OpenZFS and OpenZVOL\n");
 			clean_extra_installs();
 			CleanupOpenZFSDriverPackages();
+
 			printf("[4/4] Completed.\n");
 		} else {
 			fprintf(stderr, "Incorrect argument usage\n");
@@ -475,6 +518,13 @@ main(int argc, char *argv[])
 			printUsage();
 			return (ERROR_BAD_ARGUMENTS);
 		}
+	}
+
+	if (do_uninstall || do_install) {
+		if (!ret && reboot_indicated) {
+			return (ERROR_SUCCESS_REBOOT_REQUIRED);
+		}
+		return (ret);
 	}
 
 	if (strcmp(argv[1], "trace") == 0) {
@@ -623,7 +673,10 @@ installRootDevice(char *inf, bool IsServiceRunning, const char *rootdev)
 	UpdateDriverForPlugAndPlayDevicesA(NULL, rootdev,
 		inf, flags, &reboot);
 
-	if (reboot) printf("Windows indicated a Reboot is required.\n");
+	if (reboot) {
+		reboot_indicated = true;
+		printf("Windows indicated a Reboot is required.\n");
+	}
 
 	final:
 
@@ -887,6 +940,128 @@ uninstallRootDevice(char *inf, const char *rootdev)
 	return (failcode);
 }
 
+// --- helpers ---------------------------------------------------------------
+
+static bool GetStringPropW(HDEVINFO hdi, SP_DEVINFO_DATA *dev, DWORD prop, std::wstring &out)
+{
+	WCHAR buf[1024]; DWORD req = 0;
+	if (!SetupDiGetDeviceRegistryPropertyW(hdi, dev, prop, nullptr, (PBYTE)buf, sizeof(buf), &req))
+		return false;
+	out.assign(buf);
+	return true;
+}
+
+static void DisableDeviceNode(HDEVINFO hdi, SP_DEVINFO_DATA *dev)
+{
+	SP_PROPCHANGE_PARAMS pcp{};
+	pcp.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+	pcp.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+	pcp.StateChange = DICS_DISABLE;
+	pcp.Scope = DICS_FLAG_GLOBAL;
+	pcp.HwProfile = 0;
+
+	if (SetupDiSetClassInstallParamsW(hdi, dev,
+		reinterpret_cast<SP_CLASSINSTALL_HEADER *>(&pcp), sizeof(pcp)))
+	{
+		(void)SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, hdi, dev);
+	}
+}
+
+static CONFIGRET QueryAndRemoveByInstanceId(PCWSTR instanceId, PNP_VETO_TYPE *vetoType, std::wstring &vetoName)
+{
+	DEVINST dn = 0;
+	CONFIGRET cr = CM_Locate_DevNodeW(&dn, const_cast<PWSTR>(instanceId), CM_LOCATE_DEVNODE_NORMAL);
+	if (cr != CR_SUCCESS) return cr;
+
+	WCHAR name[256] = {};
+	cr = CM_Query_And_Remove_SubTreeW(dn, vetoType, name, ARRAYSIZE(name), 0);
+	if (cr == CR_REMOVE_VETOED) vetoName.assign(name);
+	return cr;
+}
+
+// --- main routine ----------------------------------------------------------
+
+DWORD QuiesceAndRemoveOpenZFS(_Out_opt_ bool *needsReboot /*=nullptr*/)
+{
+	if (needsReboot) *needsReboot = false;
+
+	// Enumerate all present devices in all classes.
+	HDEVINFO hdi = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+	if (hdi == INVALID_HANDLE_VALUE) return GetLastError();
+
+	DWORD i = 0;
+	SP_DEVINFO_DATA dev{ sizeof(dev) };
+	bool anyFound = false;
+	DWORD finalWin32 = ERROR_SUCCESS;
+
+	while (SetupDiEnumDeviceInfo(hdi, i++, &dev))
+	{
+		std::wstring service;
+		if (!GetStringPropW(hdi, &dev, SPDRP_SERVICE, service))
+			continue;
+
+		if (_wcsicmp(service.c_str(), L"OpenZFS") != 0)
+			continue; // not ours
+
+		anyFound = true;
+
+		// Get instance ID for logging and CfgMgr ops
+		WCHAR instId[256]; DWORD need = 0;
+		if (!SetupDiGetDeviceInstanceIdW(hdi, &dev, instId, ARRAYSIZE(instId), &need))
+			instId[0] = L'\0';
+
+		fwprintf(stderr, L"[OpenZFS] targeting devnode %s\n", instId[0] ? instId : L"(unknown)");
+
+		// 1) Try to disable the devnode (best effort)
+		DisableDeviceNode(hdi, &dev);
+
+		// 2) Query-and-remove (capture veto info)
+		PNP_VETO_TYPE veto = PNP_VetoTypeUnknown;
+		std::wstring vetoName;
+		CONFIGRET cr = QueryAndRemoveByInstanceId(instId, &veto, vetoName);
+
+		if (cr == CR_SUCCESS) {
+			fwprintf(stderr, L"[OpenZFS] CM_Query_And_Remove_SubTreeW: removed %s\n", instId);
+			continue;
+		}
+
+		if (cr == CR_REMOVE_VETOED) {
+			fwprintf(stderr, L"[OpenZFS] removal vetoed (%d): %ls\n", (int)veto, vetoName.c_str());
+			// 3) Give it a short grace period to clear (handles, etc.)
+			//    Poll for up to ~3s (30 x 100ms). If still vetoed, mark reboot.
+			for (int t = 0; t < 30; ++t) {
+				Sleep(100);
+				veto = PNP_VetoTypeUnknown; vetoName.clear();
+				cr = QueryAndRemoveByInstanceId(instId, &veto, vetoName);
+				if (cr == CR_SUCCESS) {
+					fwprintf(stderr, L"[OpenZFS] removal succeeded after wait: %ls\n", instId);
+					break;
+				}
+				if (cr != CR_REMOVE_VETOED) break;
+			}
+			if (cr == CR_REMOVE_VETOED) {
+				if (needsReboot) *needsReboot = true;
+				reboot_indicated = true;
+				finalWin32 = ERROR_SHUTDOWN_IN_PROGRESS; // “needs reboot” surrogate
+				fwprintf(stderr, L"[OpenZFS] still vetoed; will require reboot. Veto by: %ls\n",
+					vetoName.empty() ? L"(unknown)" : vetoName.c_str());
+			}
+			continue;
+		}
+
+		// Other CfgMgr error: log and keep the last one
+		fwprintf(stderr, L"[OpenZFS] CM_Query_And_Remove_SubTreeW failed: 0x%lx\n", (unsigned long)cr);
+		finalWin32 = ERROR_GEN_FAILURE; // CR_TO_WIN32(cr); // helper macro in cfgmgr32.h; if unavailable, map to ERROR_GEN_FAILURE
+	}
+
+	if (hdi != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(hdi);
+
+	// If we didn’t find any OpenZFS devnodes, that’s not an error.
+	if (!anyFound) return ERROR_SUCCESS;
+
+	return finalWin32;
+}
+
 DWORD
 zfs_install(char *inf_path)
 {
@@ -915,7 +1090,7 @@ zfs_install(char *inf_path)
 	// Start driver service if not already running
 	char serviceName[] = "OpenZFS";
 	if (!error)
-		error = startService(serviceName);
+		;//		error = startService(serviceName);
 	else
 		fprintf(stderr, "Installation failed, skip "
 			"starting the service\r\n");
@@ -986,6 +1161,10 @@ zfs_uninstall(char *inf_path)
 	system("sc query OpenZFS");
 	fprintf(stderr, "\n\n");
 #endif
+	bool needReboot = false;
+	QuiesceAndRemoveOpenZFS(&needReboot);
+	printf("QuiesceAndRemoveOpenZFS: needReboot=%d\n", needReboot);
+
 
 	// 128+2	Always ask the users if they want to reboot.
 	if (ret == 0)
@@ -1003,6 +1182,8 @@ zfs_uninstall(char *inf_path)
 
 	return (ret);
 }
+
+
 
 DWORD
 zvol_uninstall(char *inf_path)
@@ -1432,6 +1613,8 @@ uninstall_zed()
 	printf("ZED service uninstalled successfully.\n");
 	CloseServiceHandle(hService);
 	CloseServiceHandle(hSCManager);
+
+	sleep(3);
 
 	// Optionally remove zed.txt log file
 	DeleteFileA("C:\\Program Files\\OpenZFS on Windows\\zed.txt");
