@@ -2713,6 +2713,9 @@ zfs_znode_getvnode(znode_t *zp, znode_t *dzp, zfsvfs_t *zfsvfs)
 		 * To maintain a well-defined vnode tree,
 		 * we need the parent here.
 		 * This could cascade?
+		 * Ah so unlinkeddrain zget() will NOT
+		 * have parents, so we need to let those pass.
+		 * Also, nothing seems to check the returncode.
 		 */
 		if (dzp != NULL)
 			parentvp = ZTOV(dzp);
@@ -2723,10 +2726,10 @@ zfs_znode_getvnode(znode_t *zp, znode_t *dzp, zfsvfs_t *zfsvfs)
 			znode_t *parentzp;
 			VERIFY(sa_lookup(zp->z_sa_hdl, SA_ZPL_PARENT(zfsvfs),
 			    &parent, sizeof (parent)) == 0);
-			if (zfs_zget(zfsvfs, parent, &parentzp) != 0) {
-				return (ENOSYS);
+			if (zfs_zget(zfsvfs, parent, &parentzp) == 0) {
+				parentvp = ZTOV(parentzp);
+				dprintf("Warning, no parent.\n");
 			}
-			parentvp = ZTOV(parentzp);
 		}
 	}
 

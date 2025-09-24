@@ -1223,12 +1223,17 @@ again:
 
 	if (flags & ZGET_FLAG_ASYNC) {
 		/* Spawn taskq to attach while we are still locked */
-		zfs_znode_asyncgetvnode(zp, zfsvfs);
+		err = zfs_znode_asyncgetvnode(zp, zfsvfs);
 		zfs_znode_hold_exit(zfsvfs, zh);
 	} else {
 		/* Attach a vnode to our new znode, after unlock */
 		zfs_znode_hold_exit(zfsvfs, zh);
-		zfs_znode_getvnode(zp, NULL, zfsvfs);
+		err = zfs_znode_getvnode(zp, NULL, zfsvfs);
+	}
+
+	if (err != 0) {
+		*zpp = NULL;
+		zfs_znode_free(zp);
 	}
 
 	dprintf("zget returning %d\n", err);
