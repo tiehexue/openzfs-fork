@@ -99,6 +99,89 @@ static void disk_exclusive(DEVICE_OBJECT *device, boolean_t excl)
 
 }
 
+static NTSTATUS
+utf16_to_utf8(_In_reads_(cch) const WCHAR *w, SIZE_T cch, _Outptr_ char **out)
+{
+	ULONG bytes = 0;
+	NTSTATUS st = RtlUnicodeToUTF8N(NULL, 0, &bytes, w,
+	    (ULONG)(cch * sizeof (WCHAR)));
+	if (!NT_SUCCESS(st) || bytes == 0)
+		return (st ? st : STATUS_UNSUCCESSFUL);
+	char *buf = ExAllocatePoolWithTag(PagedPool, bytes + 1, 'pfZS');
+	if (!buf)
+		return (STATUS_INSUFFICIENT_RESOURCES);
+
+	st = RtlUnicodeToUTF8N(buf, bytes, &bytes, w,
+	    (ULONG)(cch * sizeof (WCHAR)));
+	if (!NT_SUCCESS(st)) {
+		ExFreePoolWithTag(buf, 'pfZS');
+		return (st);
+	}
+	buf[bytes] = '\0';
+	*out = buf;
+	return (STATUS_SUCCESS);
+}
+
+
+// devobj: the device object you already have for this PhysicalDrive
+// out_utf8: returns a UTF-8 \??\...#{GUID_DEVINTERFACE_DISK} link
+static NTSTATUS
+zfs_win_interface_link_from_devobj(_In_ PDEVICE_OBJECT devobj,
+    _Outptr_ char **out_utf8)
+{
+	*out_utf8 = NULL;
+
+	// Base of the stack you're holding
+	PDEVICE_OBJECT base = IoGetDeviceAttachmentBaseRef(devobj);
+	if (!base)
+		return (STATUS_NO_SUCH_DEVICE);
+
+	// Enumerate all disk interfaces
+	PWSTR links = NULL;
+	NTSTATUS st = IoGetDeviceInterfaces(&GUID_DEVINTERFACE_DISK, NULL, 0,
+	    &links);
+	if (!NT_SUCCESS(st) || !links) {
+		ObDereferenceObject(base);
+		return (st ? st : STATUS_NOT_FOUND);
+	}
+
+	// Walk MULTI_SZ
+	for (PWSTR p = links; p && *p; p += wcslen(p) + 1) {
+		UNICODE_STRING us;
+		RtlInitUnicodeString(&us, p);
+
+		PFILE_OBJECT ifo = NULL;
+		PDEVICE_OBJECT itop = NULL;
+		st = IoGetDeviceObjectPointer(&us, FILE_READ_ATTRIBUTES, &ifo,
+		    &itop);
+		if (NT_SUCCESS(st)) {
+			PDEVICE_OBJECT ibase =
+			    IoGetDeviceAttachmentBaseRef(itop);
+			if (ibase == base) {
+				// match > convert 'p' to UTF-8 and return
+				char *utf8 = NULL;
+				NTSTATUS st2 = utf16_to_utf8(p, wcslen(p),
+				    &utf8);
+				ObDereferenceObject(ibase);
+				ObDereferenceObject(ifo);
+				if (NT_SUCCESS(st2)) {
+					*out_utf8 = utf8;
+					ExFreePool(links);
+					ObDereferenceObject(base);
+					return (STATUS_SUCCESS);
+				}
+				// else, keep searching
+			} else {
+				ObDereferenceObject(ibase);
+				ObDereferenceObject(ifo);
+			}
+		}
+	}
+
+	ExFreePool(links);
+	ObDereferenceObject(base);
+	return (STATUS_NOT_FOUND);
+}
 
 /*
  * We want to be loud in DEBUG kernels when DKIOCGMEDIAINFOEXT fails, or when
@@ -479,6 +562,48 @@ skip_open:
 
 	dprintf("%s: nonrot %d, trim %d, securetrim %d\n", __func__,
 	    vd->vdev_nonrot, vd->vdev_has_trim, vd->vdev_has_securetrim);
+
+	// Now check if the FileName is PHYSICALDRIVEx, then fix it
+	if (FileName[0] == '\\' &&
+	    FileName[1] == '?' &&
+	    FileName[2] == '?' &&
+	    FileName[3] == '\\' &&
+	    toupper(FileName[4]) == 'P' &&
+	    toupper(FileName[5]) == 'H' &&
+	    toupper(FileName[6]) == 'Y' &&
+	    toupper(FileName[7]) == 'S' &&
+	    toupper(FileName[8]) == 'I' &&
+	    toupper(FileName[9]) == 'C' &&
+	    toupper(FileName[10]) == 'A' &&
+	    toupper(FileName[11]) == 'L' &&
+	    toupper(FileName[12]) == 'D' &&
+	    toupper(FileName[13]) == 'R' &&
+	    toupper(FileName[14]) == 'I' &&
+	    toupper(FileName[15]) == 'V' &&
+	    toupper(FileName[16]) == 'E' &&
+	    spa_mode(spa) != SPA_MODE_READ) {
+		char *iface = NULL;
+		if (NT_SUCCESS(zfs_win_interface_link_from_devobj(DeviceObject,
+		    &iface))) {
+
+			spa_strfree(vd->vdev_physpath);
+
+			if (dvd->vdev_win_offset || dvd->vdev_win_length)
+				vd->vdev_physpath =
+				    kmem_asprintf("#%llu#%llu#%s",
+				    dvd->vdev_win_offset, dvd->vdev_win_length,
+				    iface);
+			else
+				vd->vdev_physpath = spa_strdup(iface);
+
+			dprintf("converted physicaldrive '%s' to '%s'\n",
+			    FileName, vd->vdev_physpath);
+			spa_async_request(vd->vdev_spa,
+			    SPA_ASYNC_CONFIG_UPDATE);
+			ExFreePoolWithTag(iface, 'pfZS');
+		}
+	}
+
 
 	return (0);
 }
