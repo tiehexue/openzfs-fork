@@ -202,6 +202,8 @@ Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\zfsinstaller\*.pdb"; DestDir
 Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\kstat\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
 Source: "{#SourcePath}\HowToDebug.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\contrib\windows\parsedump\*.*"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\contrib\windows\EnableOpenZFSLocalCrashDumps.reg"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\contrib\windows\DisableOpenZFSLocalCrashDumps.reg"; DestDir: "{app}\symbols"; Flags: ignoreversion
 Source: "{#Root}\scripts\zfs_prepare_disk"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\cmd\zpool\compatibility.d\*"; DestDir: "{app}\compatibility.d"; Flags: ignoreversion
 Source: "{#Root}\cmd\zpool\zpool.d\*"; DestDir: "{app}\zpool.d"; Flags: ignoreversion
