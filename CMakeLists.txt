@@ -76,6 +76,10 @@ add_compile_options(
 	#Visual Studio 2022 update 2022114 started breaking builds with errors
 	-Wno-int-conversion
 )
+
+add_compile_options(/Zi /Od /Oy- /Zo /Ob0)
+add_link_options(/DEBUG:FULL /INCREMENTAL /OPT:NOREF /OPT:NOICF)
+
 endfunction()
 
 string(CONCAT WDK_LINK_FLAGS
