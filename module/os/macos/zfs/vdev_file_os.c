@@ -114,4 +114,46 @@ vdev_file_close_all(objset_t *os)
 	vdev_file_close_all_impl(spa->spa_root_vdev);
 	spa_config_exit(spa, SCL_VDEV, FTAG);
 }
+
+static mode_t
+vdev_file_open_mode(spa_mode_t spa_mode)
+{
+	mode_t mode = 0;
+
+	if ((spa_mode & SPA_MODE_READ) && (spa_mode & SPA_MODE_WRITE)) {
+		mode = O_RDWR;
+	} else if (spa_mode & SPA_MODE_READ) {
+		mode = O_RDONLY;
+	} else if (spa_mode & SPA_MODE_WRITE) {
+		mode = O_WRONLY;
+	}
+
+	return (mode | O_LARGEFILE);
+}
+
+int
+vdev_file_os_io_start(zio_t *zio)
+{
+	vdev_t *vd = zio->io_vd;
+	vdev_file_t *vf = vd->vdev_tsd;
+
+	if (vf != NULL && vf->vf_file == NULL) {
+		zfs_file_t *fp = NULL;
+		int error;
+
+		error = zfs_file_open(vd->vdev_path,
+		    vdev_file_open_mode(spa_mode(vd->vdev_spa)), 0, &fp);
+
+		if (error == 0) {
+			atomic_cas_ptr(&vf->vf_file, NULL, fp);
+			if (vf->vf_file != fp)
+				zfs_file_close(fp); /* We lost */
+		}
+
+		if (vf->vf_file == NULL)
+			return (ENXIO);
+	}
+
+	return (0);
+}
 #endif

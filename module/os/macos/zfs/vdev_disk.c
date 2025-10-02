@@ -937,6 +937,7 @@ vdev_disk_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	    INT_MAX, TASKQ_PREPOPULATE);
 
 	VERIFY(vdev_disk_taskq_default);
+	return (0);
 }
 
 static void

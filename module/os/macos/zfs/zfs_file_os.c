@@ -79,6 +79,10 @@ void
 zfs_file_close(zfs_file_t *fp)
 {
 	vfs_context_t vctx;
+
+	if (fp == NULL)
+		return;
+
 	vctx = vfs_context_create((vfs_context_t)0);
 	vnode_close(fp->f_vnode, fp->f_writes ? FWASWRITTEN : 0, vctx);
 	(void) vfs_context_rele(vctx);
@@ -92,6 +96,9 @@ zfs_file_write_impl(zfs_file_t *fp, const void *buf, size_t count,
 {
 	int error;
 	ssize_t local_resid = count;
+
+	if (fp == NULL)
+		return (EIO);
 
 	/* If we came with a 'fd' use it, as it can handle pipes. */
 again:
@@ -188,6 +195,9 @@ zfs_file_read_impl(zfs_file_t *fp, void *buf, size_t count, loff_t *off,
 	int error;
 	ssize_t local_resid = count;
 
+	if (fp == NULL)
+		return (EIO);
+
 	/* If we have realvp, it's faster to call its spl_vn_rdwr */
 again:
 	if (fp->f_fd == FILE_FD_NOTUSED)
@@ -278,6 +288,9 @@ zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
 	if (*offp < 0 || *offp > MAXOFFSET_T)
 		return (EINVAL);
 
+	if (fp == NULL)
+		return (EIO);
+
 	switch (whence) {
 		case SEEK_SET:
 			fp->f_offset = *offp;
@@ -312,6 +325,9 @@ zfs_file_getattr(zfs_file_t *filp, zfs_file_attr_t *zfattr)
 	int rc;
 	vattr_t vap;
 
+	if (filp == NULL)
+		return (EIO);
+
 	VATTR_INIT(&vap);
 	VATTR_WANTED(&vap, va_size);
 	VATTR_WANTED(&vap, va_mode);
@@ -343,6 +359,9 @@ zfs_file_fsync(zfs_file_t *filp, int flags)
 	vfs_context_t vctx;
 	int rc;
 
+	if (filp == NULL)
+		return (EIO);
+
 	vctx = vfs_context_create((vfs_context_t)0);
 	rc = VNOP_FSYNC(filp->f_vnode, (flags == FSYNC), vctx);
 	(void) vfs_context_rele(vctx);
@@ -365,6 +384,9 @@ zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
 	int rc;
 	struct flock flck = { 0 };
 
+	if (fp == NULL)
+		return (EIO);
+
 	flck.l_type = F_FREESP;
 	flck.l_start = offset;
 	flck.l_len = len;
@@ -386,6 +408,9 @@ zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
 loff_t
 zfs_file_off(zfs_file_t *fp)
 {
+	if (fp == NULL)
+		return (-EIO);
+
 	return (fp->f_offset);
 }
 
