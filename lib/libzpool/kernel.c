@@ -349,94 +349,6 @@ lowbit64(uint64_t i)
 	return (__builtin_ffsll(i));
 }
 
-const char *random_path = "/dev/random";
-const char *urandom_path = "/dev/urandom";
-static int random_fd = -1, urandom_fd = -1;
-
-
-#ifdef _WIN32
-
-errno_t rand_s(unsigned int *randomValue);
-
-void
-random_init(void)
-{
-}
-
-void
-random_fini(void)
-{
-}
-
-static int
-random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
-{
-	size_t resid = len;
-	ssize_t bytes;
-	unsigned int number;
-
-	while (resid != 0) {
-		rand_s(&number);
-		bytes = MIN(resid, sizeof (number));
-		memcpy(ptr, &number, bytes);
-		ASSERT3S(bytes, >=, 0);
-		ptr += bytes;
-		resid -= bytes;
-	}
-
-	return (0);
-}
-
-#else /* Windows */
-
-void
-random_init(void)
-{
-	VERIFY((random_fd = open(random_path, O_RDONLY | O_CLOEXEC)) != -1);
-	VERIFY((urandom_fd = open(urandom_path, O_RDONLY | O_CLOEXEC)) != -1);
-}
-
-void
-random_fini(void)
-{
-	close(random_fd);
-	close(urandom_fd);
-
-	random_fd = -1;
-	urandom_fd = -1;
-}
-
-static int
-random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
-{
-	size_t resid = len;
-	ssize_t bytes;
-
-	ASSERT(fd != -1);
-
-	while (resid != 0) {
-		bytes = read(fd, ptr, resid);
-		ASSERT3S(bytes, >=, 0);
-		ptr += bytes;
-		resid -= bytes;
-	}
-
-	return (0);
-}
-#endif
-
-int
-random_get_bytes(uint8_t *ptr, size_t len)
-{
-	return (random_get_bytes_common(ptr, len, random_fd));
-}
-
-int
-random_get_pseudo_bytes(uint8_t *ptr, size_t len)
-{
-	return (random_get_bytes_common(ptr, len, urandom_fd));
-}
-
 int
 ddi_strtoull(const char *str, char **nptr, int base, u_longlong_t *result)
 {
@@ -549,8 +461,6 @@ kernel_init(int mode)
 
 	hostid = (mode & SPA_MODE_WRITE) ? get_system_hostid() : 0;
 
-	random_init();
-
 	system_taskq_init();
 	icp_init();
 
@@ -574,8 +484,6 @@ kernel_fini(void)
 
 	icp_fini();
 	system_taskq_fini();
-
-	random_fini();
 
 	libspl_fini();
 }
