@@ -476,14 +476,27 @@ zfs_decouplefileobject(vnode_t *vp, FILE_OBJECT *fileobject)
 	vnode_decouplefileobject(vp, fileobject);
 }
 
+static BOOLEAN
+ends_with_suffix(PUNICODE_STRING name, PCWSTR suffix)
+{
+	size_t name_len = name->Length / sizeof (WCHAR);
+	size_t suffix_len = wcslen(suffix);
+
+	if (name_len < suffix_len)
+		return (FALSE);
+
+	return (_wcsnicmp(&name->Buffer[name_len - suffix_len], suffix,
+	    suffix_len) == 0);
+}
+
 static void
-allocate_reparse(struct vnode *vp, char *finalname, PIRP Irp)
+allocate_reparse(struct vnode *vp, char *finalname, char *stream_name, PIRP Irp)
 {
 	znode_t *zp;
 	REPARSE_DATA_BUFFER *rpb;
 	size_t size;
 	PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-	// PFILE_OBJECT FileObject = IrpSp->FileObject;
+	PFILE_OBJECT FileObject = IrpSp->FileObject;
 
 	zp = VTOZ(vp);
 	// fix me, direct vp access
@@ -499,11 +512,28 @@ allocate_reparse(struct vnode *vp, char *finalname, PIRP Irp)
 	 * associated file object.
 	 * Should include the leading "/", when finalname
 	 * here would be "lower".
+	 * Also note, if the looking was for filename:Zone.Identifier,
+	 * or similar stream name, we need to include the stream name
+	 * part. Ie, from the full FileObject->FileName, whatever that
+	 * may have been.
 	 */
 	ULONG len = 0;
 	if (finalname && *finalname) {
 		RtlUTF8ToUnicodeN(NULL, 0, &len,
 		    finalname, strlen(finalname));
+		if (stream_name != NULL) {
+			ULONG len2 = 0;
+			RtlUTF8ToUnicodeN(NULL, 0, &len2,
+			    stream_name, strlen(stream_name));
+			len += len2 + sizeof (WCHAR); // for ':'
+
+			// Sadly the ":$DATA" can be implied
+			if (!ends_with_suffix(&IrpSp->FileObject->FileName,
+			    L":$DATA")) {
+				len -= sizeof (WCHAR) * 6;
+			}
+		}
+
 		len += sizeof (WCHAR);
 	}
 	rpb->Reserved = len;
@@ -1692,7 +1722,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			 */
 			Irp->IoStatus.Information = 0;
 			Irp->IoStatus.Status = 0;
-			allocate_reparse(vp, finalname, Irp);
+			allocate_reparse(vp, finalname, stream_name, Irp);
 
 			// should this only work on the final component?
 #if 0
@@ -1772,8 +1802,9 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		if ((error = zfs_get_xattrdir(zp, &dzp, cr,
 		    CreateFile ? CREATE_XATTR_DIR : 0))) {
 			Irp->IoStatus.Information = FILE_DOES_NOT_EXIST;
-			VN_RELE(vp)
-			VN_RELE(dvp);
+			VN_RELE(vp);
+			if (dvp && !dvp_no_rele)
+				VN_RELE(dvp);
 			dprintf("No xattr dir - and not creating one\n");
 			return (STATUS_OBJECT_NAME_NOT_FOUND);
 		}
