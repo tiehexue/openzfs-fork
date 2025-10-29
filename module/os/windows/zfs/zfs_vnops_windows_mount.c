@@ -514,26 +514,33 @@ SendVolumeCreatePoint(__in PUNICODE_STRING DeviceName,
  * TargetName: "\Device\..."
  *
  */
+static uint64_t mountmgr_automount_count = 0ULL;
+static MOUNTMGR_QUERY_AUTO_MOUNT QueryAutoMount;
+static ULONG QueryAutoMountSize = sizeof (MOUNTMGR_QUERY_AUTO_MOUNT);
+
 NTSTATUS
 NotifyVolumeArrival(PUNICODE_STRING unicodeSourceVolumeName)
 {
 	NTSTATUS status;
+	MOUNTMGR_SET_AUTO_MOUNT SetAutoMount;
 
 	// Check if automount is on
-	MOUNTMGR_QUERY_AUTO_MOUNT QueryAutoMount;
-	ULONG QueryAutoMountSize = sizeof (MOUNTMGR_QUERY_AUTO_MOUNT);
-
-	SendIoctlToMountManager(IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT, NULL, 0,
-	    &QueryAutoMount, QueryAutoMountSize);
-
-	dprintf("%s: AutoMount is %s\n", __func__,
-	    QueryAutoMount.CurrentState == 0 ? "Disabled" : "Enabled");
-
 	// Disable AutoMount
-	MOUNTMGR_SET_AUTO_MOUNT SetAutoMount;
-	SetAutoMount.NewState = 0; // Disabled
-	SendIoctlToMountManager(IOCTL_MOUNTMGR_SET_AUTO_MOUNT,
-	    &SetAutoMount, sizeof (SetAutoMount), NULL, 0);
+	if (atomic_add_64_nv(&mountmgr_automount_count, 1) == 1) {
+
+		SendIoctlToMountManager(IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT,
+		    NULL, 0, &QueryAutoMount, QueryAutoMountSize);
+
+		dprintf("%s: AutoMount is %s - disabling\n", __func__,
+		    QueryAutoMount.CurrentState == 0 ?
+		    "Disabled" : "Enabled");
+
+		SetAutoMount.NewState = 0; // Disabled
+		SendIoctlToMountManager(IOCTL_MOUNTMGR_SET_AUTO_MOUNT,
+		    &SetAutoMount, sizeof (SetAutoMount), NULL, 0);
+
+	}
+
 
 	// Now tell MountMgr about the new mount
 
@@ -571,9 +578,12 @@ NotifyVolumeArrival(PUNICODE_STRING unicodeSourceVolumeName)
 
 out:
 	// Restore AutoMount
-	SetAutoMount.NewState = QueryAutoMount.CurrentState;
-	SendIoctlToMountManager(IOCTL_MOUNTMGR_SET_AUTO_MOUNT,
-	    &SetAutoMount, sizeof (SetAutoMount), NULL, 0);
+	if (atomic_sub_64_nv(&mountmgr_automount_count, 1) == 0) {
+		dprintf("Restoring automount\n");
+		SetAutoMount.NewState = QueryAutoMount.CurrentState;
+		SendIoctlToMountManager(IOCTL_MOUNTMGR_SET_AUTO_MOUNT,
+		    &SetAutoMount, sizeof (SetAutoMount), NULL, 0);
+	}
 
 	dprintf("<= NotifyVolumeArrival\n");
 	return (status);
@@ -784,6 +794,12 @@ InitVpb(__in PVPB Vpb, __in PDEVICE_OBJECT VolumeDevice, mount_t *zmo)
 	}
 }
 
+typedef struct _REPARSE_DELETE_HDR {
+    ULONG  ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+} REPARSE_DELETE_HDR;
+
 //
 // PrintName:
 // SubstituteName:
@@ -795,21 +811,54 @@ CreateReparsePoint(POBJECT_ATTRIBUTES poa, PCUNICODE_STRING SubstituteName,
 	HANDLE hFile;
 	IO_STATUS_BLOCK iosb;
 	NTSTATUS status;
+	FILE_DISPOSITION_INFORMATION fdi = { .DeleteFile = TRUE };
+	REPARSE_DELETE_HDR hdr = { IO_REPARSE_TAG_MOUNT_POINT, 0, 0 };
 
 	dprintf("%s: \n", __func__);
 	xprintf("%s: \n", __func__);
 
-	// this is stalled forever waiting for event of deletion -
-	// possibly ZFS doesnt send event?
-	status = ZwDeleteFile(poa);
-	if (status != STATUS_SUCCESS)
-		dprintf("pre-rmdir failed 0x%lx - which is OK\n", status);
+	poa->Attributes |= OBJ_DONT_REPARSE;
+
+	status = ZwCreateFile(&hFile,
+	    DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+	    poa, &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	    FILE_OPEN,
+	    FILE_DIRECTORY_FILE |
+	    FILE_OPEN_REPARSE_POINT |
+	    FILE_OPEN_FOR_BACKUP_INTENT |
+	    FILE_SYNCHRONOUS_IO_NONALERT,
+	    NULL, 0);
+
+	poa->Attributes &= ~OBJ_DONT_REPARSE;
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("pre-rmdir failed 0x%lx - means it wasn't there\n",
+		    status);
+	} else {
+		status = ZwFsControlFile(hFile, NULL, NULL, NULL, &iosb,
+		    FSCTL_DELETE_REPARSE_POINT,
+		    &hdr, sizeof (hdr), NULL, 0);
+		dprintf("Removing REPARSE_POINT status 0x%lx (failure is OK)\n",
+		    status);
+
+		status = ZwSetInformationFile(hFile, &iosb, &fdi, sizeof (fdi),
+		    FileDispositionInformation);
+		dprintf("Setting delete-file status 0x%lx (failure not ok)\n",
+		    status);
+
+		ZwClose(hFile);
+	}
+
+	// Now create the reparsepoint to mount on
+
 	status = ZwCreateFile(&hFile, FILE_ALL_ACCESS, poa, &iosb, 0, 0, 0,
 	    FILE_CREATE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
 	    0, 0);
+	dprintf("ZwCreateFile 0x%lx\n", status);
+
 	if (!NT_SUCCESS(status))
 		return (status);
-	dprintf("%s: create ok\n", __func__);
 
 	// SubstituteName must be first, offset = 0
 	// Both names must be NULL terminated
@@ -839,7 +888,6 @@ CreateReparsePoint(POBJECT_ATTRIBUTES poa, PCUNICODE_STRING SubstituteName,
 	dprintf("%s: ControlFile %ld / 0x%lx\n", __func__, status, status);
 
 	if (!NT_SUCCESS(status)) {
-		static FILE_DISPOSITION_INFORMATION fdi = { TRUE };
 		ZwSetInformationFile(hFile, &iosb, &fdi,
 		    sizeof (fdi), FileDispositionInformation);
 	}
@@ -1469,6 +1517,163 @@ zfs_windows_mount(zfs_cmd_t *zc)
 	return (status);
 }
 
+static NTSTATUS
+ResolveSymlinkTarget(PCUNICODE_STRING Link, PUNICODE_STRING TargetBufOut)
+{
+	NTSTATUS st;
+	HANDLE h = NULL;
+	OBJECT_ATTRIBUTES oa;
+
+	InitializeObjectAttributes(&oa, (PUNICODE_STRING)Link,
+	    OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	st = ZwOpenSymbolicLinkObject(&h, SYMBOLIC_LINK_QUERY, &oa);
+	if (!NT_SUCCESS(st))
+		return (st);
+
+	ULONG dummy = 0;
+	st = ZwQuerySymbolicLinkObject(h, TargetBufOut, &dummy);
+	ZwClose(h);
+	return (st);
+}
+
+static BOOLEAN
+DosDevicesToGlobal(const UNICODE_STRING *dos,
+    UNICODE_STRING *globalOut, WCHAR *scratch, USHORT scratchChars)
+{
+	static const WCHAR prefix[] = L"\\GLOBAL??\\";
+	const WCHAR *s = dos->Buffer;
+	USHORT n = dos->Length / sizeof (WCHAR);
+
+	if (n < 12 || _wcsnicmp(s, L"\\DosDevices\\", 12) != 0)
+		return (FALSE);
+
+	USHORT need = ARRAYSIZE(prefix) - 1 + (n - 12);
+	if (need + 1 > scratchChars)
+		return (FALSE);
+
+	USHORT i = 0, j = 0;
+	while (prefix[i]) scratch[j++] = prefix[i++];
+	for (USHORT k = 12; k < n; ++k) scratch[j++] = s[k];
+	scratch[j] = L'\0';
+
+	globalOut->Buffer = scratch;
+	globalOut->Length = j * sizeof (WCHAR);
+	globalOut->MaximumLength = scratchChars * sizeof (WCHAR);
+	return (TRUE);
+}
+
+static NTSTATUS
+WaitParentLetterReadyFromDcb(mount_t *dcb)
+{
+	if (!dcb || !dcb->justDriveLetter)
+		return (STATUS_SUCCESS);
+
+	// Build \\GLOBAL??\\X:
+	WCHAR glBuf[64];
+	UNICODE_STRING globalLetter = { 0 };
+	if (!DosDevicesToGlobal(&dcb->mountpoint, &globalLetter, glBuf,
+	    ARRAYSIZE(glBuf)))
+		return (STATUS_INVALID_PARAMETER);
+
+	// Expected device target
+	const UNICODE_STRING *expectedDev = &dcb->device_name;
+
+	// Also check that the Volume{GUID} \\?? link (MountMgr_name)
+	// points to us
+	const UNICODE_STRING *volumeGuidLink = &dcb->MountMgr_name;
+
+	LARGE_INTEGER t50ms;
+	t50ms.QuadPart = -50 * 10 * 1000; // 50 ms
+	for (int attempt = 0; attempt < 20; ++attempt) {
+		// 1) \\GLOBAL??\\X: -> \Device\zfs-...
+		WCHAR tgtBuf1[256]; UNICODE_STRING tgt1 = {
+		    .Buffer = tgtBuf1,
+		    .MaximumLength = sizeof (tgtBuf1)
+		};
+		NTSTATUS st1 = ResolveSymlinkTarget(&globalLetter, &tgt1);
+
+		// 2) \\??\\Volume{GUID} -> \Device\zfs-...
+		WCHAR tgtBuf2[256];
+		UNICODE_STRING tgt2 = {
+		    .Buffer = tgtBuf2,
+		    .MaximumLength = sizeof (tgtBuf2)
+		};
+		NTSTATUS st2 = ResolveSymlinkTarget(volumeGuidLink, &tgt2);
+
+		BOOLEAN good1 = NT_SUCCESS(st1) &&
+		    RtlEqualUnicodeString(&tgt1, expectedDev, TRUE);
+		BOOLEAN good2 = NT_SUCCESS(st2) &&
+		    RtlEqualUnicodeString(&tgt2, expectedDev, TRUE);
+
+		if (good1 && good2) {
+			// 3) Try opening the root of X:
+			WCHAR rootW[8];
+			// Build "\\??\\X:\\"
+			// We know dosdevices_mountpoint ends with "X:",
+			// so compose "\\??\\X:\\"
+			rootW[0] = L'\\';
+			rootW[1] = L'?';
+			rootW[2] = L'?';
+			rootW[3] = L'\\';
+			rootW[4] = dcb->mountpoint.Buffer[
+			    dcb->mountpoint.Length / 2 - 2]; // 'X'
+			rootW[5] = L':';
+			rootW[6] = L'\\';
+			rootW[7] = L'\0';
+			UNICODE_STRING root = {
+			    .Buffer = rootW,
+			    .Length = 6 * sizeof (WCHAR),
+			    .MaximumLength = 8 * sizeof (WCHAR)
+			};
+
+			OBJECT_ATTRIBUTES oa;
+			IO_STATUS_BLOCK iosb = { 0 };
+			InitializeObjectAttributes(&oa, &root,
+			    OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+			    NULL, NULL);
+
+			HANDLE h = NULL;
+			NTSTATUS st = ZwCreateFile(&h,
+			    FILE_LIST_DIRECTORY | SYNCHRONIZE, &oa, &iosb, NULL,
+			    FILE_ATTRIBUTE_DIRECTORY,
+			    FILE_SHARE_READ | FILE_SHARE_WRITE |
+			    FILE_SHARE_DELETE,
+			    FILE_OPEN, FILE_DIRECTORY_FILE |
+			    FILE_SYNCHRONOUS_IO_NONALERT,
+			    NULL, 0);
+
+			if (NT_SUCCESS(st)) {
+				ZwClose(h);
+				return (STATUS_SUCCESS);
+			}
+
+			// Only spin on "not ready yet"
+			if (st != STATUS_OBJECT_PATH_NOT_FOUND &&
+			    st != STATUS_OBJECT_NAME_NOT_FOUND &&
+			    st != STATUS_REPARSE)
+				return (st);
+		}
+
+		// Spin only on the "not ready yet" cases;
+		// otherwise bubble the error.
+		if ((!NT_SUCCESS(st1) &&
+		    st1 != STATUS_OBJECT_PATH_NOT_FOUND &&
+		    st1 != STATUS_OBJECT_NAME_NOT_FOUND &&
+		    st1 != STATUS_OBJECT_TYPE_MISMATCH) ||
+		    (!NT_SUCCESS(st2) &&
+		    st2 != STATUS_OBJECT_PATH_NOT_FOUND &&
+		    st2 != STATUS_OBJECT_NAME_NOT_FOUND &&
+		    st2 != STATUS_OBJECT_TYPE_MISMATCH)) {
+			return (NT_SUCCESS(st1) ? st2 : st1);
+		}
+
+		KeDelayExecutionThread(KernelMode, FALSE, &t50ms);
+	}
+
+	return (STATUS_OBJECT_PATH_NOT_FOUND); // timed out
+}
+
 /*
  * Which IRP_MN_MOUNT_VOLUME is called, volmgr is holding its lock
  * to call us, so we can talk to MountMgr without deadlock. If we
@@ -1623,7 +1828,12 @@ mount_volume_impl(void *arg1)
 
 	// This might need fixing
 
-	delay(hz);
+	status = WaitParentLetterReadyFromDcb(dcb);
+	if (!NT_SUCCESS(status)) {
+		dprintf("Parent DOS letter not ready (st=%08x) for %wZ\n",
+		    status, &dcb->mountpoint);
+	}
+
 	dprintf("Releasing mount wait\n");
 	zfs_release_userland(dcb);
 }

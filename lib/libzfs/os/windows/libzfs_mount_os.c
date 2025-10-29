@@ -212,6 +212,10 @@ do_mount(zfs_handle_t *zhp, const char *dir, const char *optptr, int mflag)
 					    toupper(driveletter[0]) <= 'Z')
 						break;
 					delay(hz >> 2);
+#ifdef DEBUG
+					fprintf(stderr,
+					    "waiting, looping\r\n");
+#endif
 				} while (retry++ < 10);
 
 					zfs_prop_get(pzhp,
@@ -287,11 +291,16 @@ do_mount(zfs_handle_t *zhp, const char *dir, const char *optptr, int mflag)
 		fflush(stderr);
 #endif
 		// Wait for kernel to signal mount is completed.
-		DWORD waitResult;
+		DWORD waitResult = 0;
 		if (h) {
 			waitResult = WaitForSingleObject(h, 10 * 1000);
 			CloseHandle(h);
 		}
+
+#ifdef DEBUG
+		fprintf(stderr, "kernel said wait is over %d\n", waitResult);
+		fflush(stderr);
+#endif
 
 		/*
 		 * Tell Explorer we have a new drive
