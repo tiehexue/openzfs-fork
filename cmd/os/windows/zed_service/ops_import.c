@@ -223,6 +223,17 @@ zed_import_one_json(uint32_t flags, uint64_t guid,
 	    props, imp_flags);
 
 	if (rc == 0) {
+		if (!(flags & ZIMP_NOMOUNT)) {
+			const char *final = found_name;
+			zpool_handle_t *zhp;
+			dprintf("zed_import_all_json: name %s: open\n", final);
+			if (zhp = zpool_open(g_lzh, final)) {
+				dprintf("zed_import_all_json: name %s: mounting\n", final);
+				(void)zpool_enable_datasets(zhp, NULL, 0, 1);
+				zpool_close(zhp);
+			}
+		}
+
 		fnvlist_add_boolean_value(res, "ok", B_TRUE);
 		if (new_name_utf8 && *new_name_utf8)
 			fnvlist_add_string(res, "name", new_name_utf8);
@@ -299,13 +310,25 @@ zed_import_all_json(uint32_t flags, const char *altroot_utf8,
 
 		char *pname = NULL;
 		nvlist_lookup_string(cfg, ZPOOL_CONFIG_POOL_NAME, &pname);
-		dprintf("zed_import_all_json: name %s\n", pname);
+		dprintf("zed_import_all_json: name %s: flags %x\n", pname, flags);
 
 		nvlist_t *props = build_import_props(flags, altroot_utf8);
 		int imp_flags = 0;
 
 		int rc = zpool_import_props(g_lzh, cfg, NULL, props, imp_flags);
 		if (rc == 0) {
+
+			if (!(flags & ZIMP_NOMOUNT)) {
+				const char *final = pname;
+				zpool_handle_t *zhp;
+				dprintf("zed_import_all_json: name %s: open\n", pname);
+				if (zhp = zpool_open(g_lzh, final)) {
+					dprintf("zed_import_all_json: name %s: mounting\n", pname);
+					(void) zpool_enable_datasets(zhp, NULL, 0, 1);
+					zpool_close(zhp);
+				}
+			}
+
 			if (pname) {
 				const char *one[1] = { pname };
 				fnvlist_add_string_array(res, "imported",

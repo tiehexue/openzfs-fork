@@ -27,6 +27,10 @@ export_one_handle(zpool_handle_t *zhp, uint32_t flags)
 {
 	int rc = -1;
 
+	rc = zpool_disable_datasets(zhp, B_FALSE);
+	if (rc)
+		return (rc);
+
 	rc = zpool_export(zhp,
 	    (flags & ZEXP_FORCE) ? B_TRUE : B_FALSE,
 	    (flags & ZEXP_HARD) ? B_TRUE : B_FALSE);
