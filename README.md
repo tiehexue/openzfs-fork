@@ -22,7 +22,7 @@ Developers for Windows, please see [Windows ReadMe](https://github.com/openzfson
 # Official Resources
 
   * [Documentation](https://openzfs.github.io/openzfs-docs/) - for using and developing this repo
-  * [ZoL Site](https://zfsonlinux.org) - Linux release info & links
+  * [ZoL site](https://zfsonlinux.org) - Linux release info & links
   * [Mailing lists](https://openzfs.github.io/openzfs-docs/Project%20and%20Community/Mailing%20Lists.html)
   * [OpenZFS site](https://openzfs.org/) - for conference videos and info on other platforms (illumos, OSX, Windows, etc)
 
