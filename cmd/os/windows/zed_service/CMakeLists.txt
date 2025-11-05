@@ -6,6 +6,9 @@ um_add_executable(zed_service
 	ops_status.c
 	ops_import.c
 	ops_export.c
+	ops_crypto.c
+	ops_mount.c
+	ops_common.c
 	# resource.rc
 )
 

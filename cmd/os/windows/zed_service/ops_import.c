@@ -6,13 +6,14 @@
 #include <sys/nvpair.h>
 
 #include "ops_import.h"
+#include "ops_crypto.h"
 #include "ops_status.h"
 #include "memfile.h"
 
 // Include after libzfs for dprintf
 #include "pipe_rpc.h"
 
-static libzfs_handle_t *g_lzh = NULL;
+extern libzfs_handle_t *g_lzh;
 
 static void
 add_guid_string(nvlist_t *dst, uint64_t g)
@@ -58,10 +59,6 @@ zed_import_scan_json(size_t *out_len)
 #endif
 
 	dprintf("%s: \n", __func__);
-	g_lzh = libzfs_init();
-
-	if (!g_lzh)
-		goto serialize;
 
 	importargs_t ia = { 0 };
 	// No Scan, use blkid.
@@ -147,6 +144,29 @@ serialize:
 
 /* -------------------- OP_IMPORT_ONE -------------------- */
 
+static int
+zed_import_one(libzfs_handle_t *g_lzh, nvlist_t *target_cfg,
+    const char *pool_name, const char *new_name, nvlist_t *props,
+    uint32_t imp_flags, uint32_t flags)
+{
+	// First import
+	int rc = zpool_import_props(g_lzh, target_cfg,
+	    new_name,
+	    props, imp_flags);
+
+	if (rc != 0)
+		return (rc);
+
+	char *name;
+
+	if (new_name)
+		name = new_name;
+	else
+		name = pool_name;
+
+	return (rc);
+}
+
 char *
 zed_import_one_json(uint32_t flags, uint64_t guid,
     const char *new_name_utf8, const char *altroot_utf8,
@@ -165,11 +185,6 @@ zed_import_one_json(uint32_t flags, uint64_t guid,
 		goto serialize;
 	}
 #endif
-	g_lzh = libzfs_init();
-	if (!g_lzh) {
-		fnvlist_add_string(res, "err", "libzfs_init failed");
-		goto serialize;
-	}
 
 	importargs_t ia = { 0 };
 	ia.scan = B_FALSE;
@@ -218,27 +233,20 @@ zed_import_one_json(uint32_t flags, uint64_t guid,
 	nvlist_t *props = build_import_props(flags, altroot_utf8);
 
 	int imp_flags = 0;
-	int rc = zpool_import_props(g_lzh, target_cfg,
+
+	int rc = zed_import_one(g_lzh, target_cfg, found_name,
 	    (new_name_utf8 && *new_name_utf8) ? new_name_utf8 : NULL,
-	    props, imp_flags);
+	    props, imp_flags, flags);
 
 	if (rc == 0) {
-		if (!(flags & ZIMP_NOMOUNT)) {
-			const char *final = found_name;
-			zpool_handle_t *zhp;
-			dprintf("zed_import_all_json: name %s: open\n", final);
-			if (zhp = zpool_open(g_lzh, final)) {
-				dprintf("zed_import_all_json: name %s: mounting\n", final);
-				(void)zpool_enable_datasets(zhp, NULL, 0, 1);
-				zpool_close(zhp);
-			}
-		}
-
 		fnvlist_add_boolean_value(res, "ok", B_TRUE);
 		if (new_name_utf8 && *new_name_utf8)
 			fnvlist_add_string(res, "name", new_name_utf8);
 		else if (found_name)
 			fnvlist_add_string(res, "name", found_name);
+		dprintf("zed_import_one_json: name %s: imported\n",
+		    (new_name_utf8 && *new_name_utf8) ? new_name_utf8 :
+		    found_name);
 	} else {
 		const char *e = libzfs_error_description(g_lzh);
 		fnvlist_add_string(res, "err", e ? e : "import failed");
@@ -281,9 +289,6 @@ zed_import_all_json(uint32_t flags, const char *altroot_utf8,
 	}
 #endif
 
-	g_lzh = libzfs_init();
-	if (!g_lzh) goto serialize;
-
 	importargs_t ia = { 0 };
 	ia.scan = B_FALSE;
 	ia.can_be_active = (flags & ZIMP_FORCE) ? B_TRUE : B_FALSE;
@@ -298,7 +303,8 @@ zed_import_all_json(uint32_t flags, const char *altroot_utf8,
 	nvlist_t *pools = NULL;
 	pools = zpool_search_import(&lpch, &ia);
 
-	if (!pools) goto serialize;
+	if (!pools)
+		goto serialize;
 
 	dprintf("zed_import_all_json: looping\n");
 	for (nvpair_t *nvp = nvlist_next_nvpair(pools, NULL);
@@ -310,25 +316,16 @@ zed_import_all_json(uint32_t flags, const char *altroot_utf8,
 
 		char *pname = NULL;
 		nvlist_lookup_string(cfg, ZPOOL_CONFIG_POOL_NAME, &pname);
-		dprintf("zed_import_all_json: name %s: flags %x\n", pname, flags);
+		dprintf("zed_import_all_json: name %s: flags %x\n",
+		    pname, flags);
 
 		nvlist_t *props = build_import_props(flags, altroot_utf8);
 		int imp_flags = 0;
 
-		int rc = zpool_import_props(g_lzh, cfg, NULL, props, imp_flags);
+		int rc = zed_import_one(g_lzh, cfg, pname,
+		    NULL, props, imp_flags, flags);
+
 		if (rc == 0) {
-
-			if (!(flags & ZIMP_NOMOUNT)) {
-				const char *final = pname;
-				zpool_handle_t *zhp;
-				dprintf("zed_import_all_json: name %s: open\n", pname);
-				if (zhp = zpool_open(g_lzh, final)) {
-					dprintf("zed_import_all_json: name %s: mounting\n", pname);
-					(void) zpool_enable_datasets(zhp, NULL, 0, 1);
-					zpool_close(zhp);
-				}
-			}
-
 			if (pname) {
 				const char *one[1] = { pname };
 				fnvlist_add_string_array(res, "imported",

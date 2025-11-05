@@ -12,12 +12,16 @@
 
 #define	JSMN_STATIC
 #include "jsmn.h"
+#include "jsmn_utils.h"
 
 #include "pipe_rpc.h"
 #include "rpc_client.h"
 #include "import_window.h"
+#include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
+
+extern void mount_one_pool(HWND owner, const char *pool_name_utf8);
 
 #ifndef ARRAYSIZE
 #define	ARRAYSIZE(a) (sizeof (a)/sizeof ((a)[0]))
@@ -26,18 +30,6 @@
 // ---- WM_APP messages
 #define	WM_APP_SCAN_DONE (WM_APP + 100)
 #define	WM_APP_IMPORT_DONE (WM_APP + 101)
-
-// ---- controls
-enum {
-    IDC_LBL_STATUS = 1001,
-    IDC_LIST = 1002,
-    IDC_CHK_FORCE = 1003,
-    IDC_CHK_RO = 1004,
-    IDC_CHK_NOMNT = 1005,
-    IDC_ED_ALTROOT = 1006,
-    IDC_BTN_IMPORT = 1007,
-    IDC_BTN_CLOSE = 1008,
-};
 
 // ---- data types
 typedef struct {
@@ -284,191 +276,179 @@ ComposeImportOneBody(uint8_t *buf, DWORD cap,
 	return (off);
 }
 
-// ---- Import window proc
-static LRESULT CALLBACK
-ImportWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static int parse_import_pool(const char *json, int len,
+    char *pool_out, size_t pool_out_sz,
+    uint64_t *guid_out /* optional */)
 {
-	ImportCtx *ctx = (ImportCtx *)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+	jsmn_parser p;
+	jsmntok_t tok[256];
+	jsmn_init(&p);
+	int n = jsmn_parse(&p, json, len, tok, _countof(tok));
+	if (n < 1 || tok[0].type != JSMN_OBJECT)
+		return (0);
+
+	int got_pool = 0;
+	for (int i = 1; i < n; i++) {
+		if (tok[i].type != JSMN_STRING)
+			continue;
+
+		if (jsmn_eq(json, &tok[i], "name") && i + 1 < n &&
+		    tok[i + 1].type == JSMN_STRING) {
+			jsmn_copy_string(json, &tok[i + 1],
+			    pool_out, pool_out_sz);
+			got_pool = 1;
+			i++;
+			continue;
+		}
+		if (guid_out && jsmn_eq(json, &tok[i], "guid") && i + 1 < n) {
+			const jsmntok_t *v = &tok[i + 1];
+			if (v->type == JSMN_PRIMITIVE) {
+				char num[32] = { 0 };
+				jsmn_copy_string(json, v, num, sizeof (num));
+				*guid_out = _strtoui64(num, NULL, 10);
+			}
+			i++;
+			continue;
+		}
+	}
+	return (got_pool);
+}
+
+static INT_PTR CALLBACK
+ImportDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	ImportCtx *ctx = (ImportCtx *)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
 
 	switch (msg) {
-	case WM_CREATE: {
-		INITCOMMONCONTROLSEX icc = { sizeof (icc),
-		    ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
+	case WM_INITDIALOG: {
+		// lParam is ctx from CreateDialogParamW/DialogBoxParamW
+		SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)lParam);
+		ctx = (ImportCtx *)lParam;
+		ctx->hWnd = hDlg;
+
+		INITCOMMONCONTROLSEX icc = {
+		    sizeof (icc),
+		    ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES
+		};
 		InitCommonControlsEx(&icc);
 
-		ctx = (ImportCtx *)((CREATESTRUCTW *)lParam)->lpCreateParams;
-		ctx->hWnd = hWnd;
-		SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)ctx);
-
-		// layout(
-		CreateWindow(TEXT("STATIC"),
-		    TEXT("Scanning for importable pools…"),
-		    WS_CHILD | WS_VISIBLE,
-		    12, 10, 360, 18, hWnd, (HMENU)IDC_LBL_STATUS, NULL, NULL);
-
-		HWND hList = CreateWindow(WC_LISTVIEW, TEXT(""),
-		    WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_SINGLESEL|WS_BORDER,
-		    12, 32, 460, 200, hWnd, (HMENU)IDC_LIST, NULL, NULL);
-		ListView_SetExtendedListViewStyle(hList,
-		    LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
-		AddListColumns(hList);
-
-		CreateWindow(TEXT("BUTTON"), TEXT("Force"),
-		    WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX,
-		    12, 238, 70, 20, hWnd, (HMENU)IDC_CHK_FORCE, NULL, NULL);
-		CreateWindow(TEXT("BUTTON"), TEXT("Read-only"),
-		    WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX,
-		    90, 238, 90, 20, hWnd, (HMENU)IDC_CHK_RO, NULL, NULL);
-		CreateWindow(TEXT("BUTTON"), TEXT("No-mount"),
-		    WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX,
-		    190, 238, 90, 20, hWnd, (HMENU)IDC_CHK_NOMNT, NULL, NULL);
-
-		CreateWindow(TEXT("STATIC"), TEXT("Altroot:"),
-		    WS_CHILD|WS_VISIBLE,
-		    12, 264, 60, 18, hWnd, 0, NULL, NULL);
-		CreateWindow(TEXT("EDIT"), TEXT(""),
-		    WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
-		    72, 262, 220, 22, hWnd, (HMENU)IDC_ED_ALTROOT, NULL, NULL);
-
-		CreateWindow(TEXT("BUTTON"), TEXT("Import"),
-		    WS_CHILD|WS_VISIBLE|WS_DISABLED,
-		    308, 258, 80, 26, hWnd, (HMENU)IDC_BTN_IMPORT, NULL, NULL);
-		CreateWindow(TEXT("BUTTON"), TEXT("Close"),
-		    WS_CHILD|WS_VISIBLE,
-		    392, 258, 80, 26, hWnd, (HMENU)IDC_BTN_CLOSE, NULL, NULL);
-
-		// kick off scan
-		ctx->hScanThread = CreateThread(NULL, 0, ScanThread, ctx, 0,
-		    NULL);
-		return (0);
+		// init listview columns, set status text, kick scan thread
+		AddListColumns(GetDlgItem(hDlg, IDC_LIST));
+		SetDlgItemTextW(hDlg, IDC_STATUS,
+		    L"Scanning for importable pools...");
+		ctx->hScanThread = CreateThread(NULL, 0, ScanThread,
+		    ctx, 0, NULL);
+		return (TRUE);
 	}
 
-	case WM_NOTIFY: {
-		LPNMHDR nh = (LPNMHDR)lParam;
-		if (nh->idFrom == IDC_LIST && (nh->code == LVN_ITEMCHANGED)) {
-			NMLISTVIEW *lv = (NMLISTVIEW*)lParam;
-			if ((lv->uChanged & LVIF_STATE) &&
-			    (lv->uNewState & LVIS_SELECTED)) {
-				EnableWindow(GetDlgItem(hWnd, IDC_BTN_IMPORT),
-				    TRUE);
-			}
-		}
-		return (0);
-	}
-
-	case WM_COMMAND: {
+	case WM_COMMAND:
 		switch (LOWORD(wParam)) {
 		case IDC_BTN_CLOSE:
-			DestroyWindow(hWnd);
-			return (0);
+			DestroyWindow(hDlg); // modeless
+			return (TRUE);
 
-		case IDC_BTN_IMPORT:
-			{
-			HWND hList = GetDlgItem(hWnd, IDC_LIST);
+		case IDC_BTN_IMPORT: {
+			HWND hList = GetDlgItem(hDlg, IDC_LIST);
 			uint64_t guid = GetSelectedGuid(hList);
 			if (!guid) {
-				MessageBoxW(hWnd,
-				    L"Select a pool to import.", L"OpenZFS",
-				    MB_OK|MB_ICONINFORMATION);
-				return (0);
+				MessageBoxW(hDlg,
+				    L"Select a pool to import.",
+				    L"OpenZFS",
+				    MB_OK | MB_ICONINFORMATION);
+				return (TRUE);
 			}
 
 			uint32_t flags = 0;
-			if (SendMessageW(GetDlgItem(hWnd, IDC_CHK_FORCE),
-			    BM_GETCHECK, 0, 0) == BST_CHECKED)
+			if (IsDlgButtonChecked(hDlg, IDC_CHK_FORCE) ==
+			    BST_CHECKED)
 				flags |= ZIMP_FORCE;
-			if (SendMessageW(GetDlgItem(hWnd, IDC_CHK_RO),
-			    BM_GETCHECK, 0, 0) == BST_CHECKED)
+			if (IsDlgButtonChecked(hDlg, IDC_CHK_READONLY) ==
+			    BST_CHECKED)
 				flags |= ZIMP_READONLY;
-			if (SendMessageW(GetDlgItem(hWnd, IDC_CHK_NOMNT),
-			    BM_GETCHECK, 0, 0) == BST_CHECKED)
+			if (IsDlgButtonChecked(hDlg, IDC_CHK_NOMOUNT) ==
+			    BST_CHECKED)
 				flags |= ZIMP_NOMOUNT;
 
-			wchar_t altrootW[260];
-			GetDlgItemTextW(hWnd, IDC_ED_ALTROOT, altrootW,
-			    ARRAYSIZE(altrootW));
+			wchar_t altrootW[MAX_PATH] = L"";
+			GetDlgItemTextW(hDlg, IDC_ED_ALTROOT, altrootW,
+			    _countof(altrootW));
 
 			uint8_t body[1024];
-			DWORD blen = ComposeImportOneBody(body, sizeof (body),
-			    flags, guid, /* new_name */ NULL, altrootW);
+			DWORD blen =
+			    ComposeImportOneBody(body, sizeof (body), flags,
+			    guid, NULL, altrootW);
 			if (!blen) {
-				MessageBoxW(hWnd, L"Invalid parameters.",
-				    L"OpenZFS", MB_OK|MB_ICONERROR);
-				return (0);
+				MessageBoxW(hDlg,
+				    L"Invalid parameters.",
+				    L"OpenZFS",
+				    MB_OK | MB_ICONERROR);
+				return (TRUE);
 			}
 
-			// Disable Import while working
-			EnableWindow(GetDlgItem(hWnd, IDC_BTN_IMPORT), FALSE);
-			SetStatus(hWnd, L"Importing…");
+			EnableWindow(GetDlgItem(hDlg, IDC_BTN_IMPORT), FALSE);
+			SetDlgItemTextW(hDlg, IDC_STATUS, L"Importing…");
 
 			uint8_t *out = NULL;
 			uint32_t st = 0, outlen = 0;
 			BOOL ok = zrpc_call(ctx->rpc, OP_IMPORT_ONE, body, blen,
 			    &st, &out, &outlen) && st == 0 && out;
-			wchar_t *msgW = NULL;
+
 			if (ok) {
-				msgW = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
-				    (outlen + 1) * 2);
-				int wn = MultiByteToWideChar(CP_UTF8, 0,
-				    (const char *)out, (int)outlen, msgW,
-				    outlen);
-				if (wn >= 0) {
-					msgW[wn] = 0;
-				} else {
-					wcscpy_s(msgW, 16, L"OK");
+				char poolA[128] = { 0 };
+				uint64_t guid2 = 0;
+				if (parse_import_pool((const char *)out,
+				    (int)outlen, poolA, sizeof (poolA),
+				    &guid2)) {
+					mount_one_pool(hDlg, poolA);
 				}
 				HeapFree(GetProcessHeap(), 0, out);
-				PostMessageW(hWnd, WM_APP_IMPORT_DONE, TRUE,
-				    (LPARAM)msgW);
+				PostMessageW(hDlg, WM_APP_IMPORT_DONE, TRUE, 0);
 			} else {
-
 				if (out) HeapFree(GetProcessHeap(), 0, out);
-				const wchar_t *fallback =
-				    L"Import failed or access denied.";
-				size_t bytes = (wcslen(fallback) + 1) *
-				    sizeof (wchar_t);
-				msgW = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
-				    bytes);
-				if (msgW)
-					wcscpy_s(msgW, bytes / sizeof (wchar_t),
-					    fallback);
-				PostMessageW(hWnd, WM_APP_IMPORT_DONE, FALSE,
-				    (LPARAM)msgW);
+				PostMessageW(hDlg, WM_APP_IMPORT_DONE, FALSE,
+				    0);
 			}
-			return (0);
+			return (TRUE);
 			}
 		}
-		return (0); // COMMAND
+		return (FALSE);
+
+	case WM_NOTIFY: {
+		LPNMHDR nh = (LPNMHDR)lParam;
+		if (nh->idFrom == IDC_LIST && nh->code == LVN_ITEMCHANGED) {
+			NMLISTVIEW *lv = (NMLISTVIEW *)lParam;
+			if ((lv->uChanged & LVIF_STATE) &&
+			    (lv->uNewState & LVIS_SELECTED))
+				EnableWindow(GetDlgItem(hDlg, IDC_BTN_IMPORT),
+				    TRUE);
+		}
+		return (FALSE);
 	}
 
 	case WM_APP_SCAN_DONE: {
-		CandidateList *cl = (CandidateList*)lParam;
-		HWND hList = GetDlgItem(hWnd, IDC_LIST);
+		CandidateList *cl = (CandidateList *)lParam;
+		HWND hList = GetDlgItem(hDlg, IDC_LIST);
 		if (!cl || cl->count == 0) {
-			SetStatus(hWnd, L"No importable pools found.");
+			SetDlgItemTextW(hDlg, IDC_STATUS,
+			    L"No importable pools found.");
 		} else {
-			SetStatus(hWnd, L"Select a pool and click Import.");
+			SetDlgItemTextW(hDlg, IDC_STATUS,
+			    L"Select a pool and click Import.");
 			PopulateList(hList, cl);
 		}
 		FreeCandidateList(cl);
-		return (0);
-		}
+		return (TRUE);
+	}
 
 	case WM_APP_IMPORT_DONE: {
 		BOOL ok = (BOOL)wParam;
-		wchar_t *msg = (wchar_t *)lParam;
-		MessageBoxW(hWnd, msg ? msg : (ok ? L"Import completed." :
-		    L"Import failed."), L"OpenZFS",
-		    MB_OK | (ok?MB_ICONINFORMATION:MB_ICONERROR));
-		if (msg) HeapFree(GetProcessHeap(), 0, msg);
-		SetStatus(hWnd, L"Ready.");
-		EnableWindow(GetDlgItem(hWnd, IDC_BTN_IMPORT), TRUE);
-		return (0);
-		}
-
-	case WM_CLOSE:
-		DestroyWindow(hWnd);
-		return (0);
+		MessageBoxW(hDlg, ok ? L"Import completed." : L"Import failed.",
+		    L"OpenZFS",
+		    MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
+		SetDlgItemTextW(hDlg, IDC_STATUS, L"Ready.");
+		EnableWindow(GetDlgItem(hDlg, IDC_BTN_IMPORT), TRUE);
+		return (TRUE);
+	}
 
 	case WM_DESTROY:
 		if (ctx) {
@@ -477,40 +457,26 @@ ImportWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				ctx->hScanThread = NULL;
 			}
 			HeapFree(GetProcessHeap(), 0, ctx);
-			SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+			SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
 		}
-		return (0);
+		return (TRUE);
 	}
-	return (DefWindowProcW(hWnd, msg, wParam, lParam));
+	return (FALSE); // DialogProc returns BOOL/INT_PTR, not DefWindowProc
 }
 
 // ---- public entry
 HWND
 CreateImportWindow(HWND hParent, zrpc_t *rpc)
 {
-	static const wchar_t *kClass = L"OpenZFS_ImportWnd";
-	static ATOM s_atom = 0;
-	if (!s_atom) {
-		WNDCLASSEXW wc = { sizeof (wc) };
-		wc.hbrBackground = (HBRUSH)(COLOR_WINDOW+1);
-		wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-		wc.hIcon   = LoadIconW(NULL, IDI_INFORMATION);
-		wc.hInstance = GetModuleHandleW(NULL);
-		wc.lpfnWndProc = ImportWndProc;
-		wc.lpszClassName = kClass;
-		s_atom = RegisterClassExW(&wc);
-	}
 	ImportCtx *ctx = (ImportCtx*)HeapAlloc(GetProcessHeap(),
 	    HEAP_ZERO_MEMORY, sizeof (*ctx));
 	if (!ctx)
 		return (NULL);
 	ctx->rpc = rpc;
 
-	HWND hWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kClass,
-	    L"OpenZFS — Import",
-	    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-	    CW_USEDEFAULT, CW_USEDEFAULT, 500, 330,
-	    hParent, NULL, GetModuleHandleW(NULL), ctx);
-	if (hWnd) ShowWindow(hWnd, SW_SHOW);
-	return (hWnd);
+	// Modeless
+	HWND hDlg = CreateDialogParamW(GetModuleHandleW(NULL),
+	    MAKEINTRESOURCEW(IDD_IMPORT),
+	    hParent, ImportDlgProc, (LPARAM)ctx);
+	if (hDlg) ShowWindow(hDlg, SW_SHOW);
 }

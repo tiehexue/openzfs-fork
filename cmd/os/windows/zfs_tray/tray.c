@@ -12,9 +12,14 @@
 
 #define	JSMN_STATIC
 #include "jsmn.h" // single-header JSON tokenizer
+#include "jsmn_utils.h"
 #include "rpc_client.h" // zrpc_t + zrpc_init/zrpc_call from earlier
 
 #include "import_window.h"
+#include "pass_prompt.h"
+
+#define	strlcpy(dest, src, siz) \
+	_snprintf_s(dest, siz, _TRUNCATE, "%s", src)
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -276,6 +281,364 @@ LoadAppIconForTray(HINSTANCE hInst)
 	    IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR));
 }
 
+// Expects {"ok":true, "locked":[{"name":"…"}, ...]}
+static int
+for_each_locked(const char *json, int len,
+    int (*cb)(const char *ds, void *arg), void *arg)
+{
+	jsmn_parser p;
+	jsmntok_t tok[512];
+	jsmn_init(&p);
+
+	dprintf("for_each_locked:\n");
+	int n = jsmn_parse(&p, json, len, tok, _countof(tok));
+	if (n < 1 || tok[0].type != JSMN_OBJECT)
+		return (0);
+	dprintf("for_each_locked: n %d\n", n);
+
+	int count = 0;
+	for (int i = 1; i < n; i++) {
+		if (tok[i].type == JSMN_STRING &&
+		    jsmn_eq(json, &tok[i], "locked") &&
+		    i + 1 < n && tok[i + 1].type == JSMN_ARRAY) {
+			int arr = i + 1;
+			int j = arr + 1;
+
+			while (j < n && tok[j].start < tok[arr].end) {
+				if (tok[j].type == JSMN_OBJECT) {
+
+	// scan object for "name"
+	int k = j + 1;
+	char name[512] = { 0 };
+	while (k < n && tok[k].start < tok[j].end) {
+		if (tok[k].type == JSMN_STRING &&
+		    jsmn_eq(json, &tok[k], "name") &&
+		    k + 1 < n && tok[k + 1].type == JSMN_STRING) {
+				jsmn_copy_string(json, &tok[k + 1], name,
+				    sizeof (name));
+			}
+		k++;
+	}
+	if (name[0]) {
+		count++;
+		if (cb && cb(name, arg))
+			return (count); // allow stop
+	}
+				}
+				j++;
+			}
+			break;
+		}
+	}
+	return (count);
+}
+
+static BOOL
+load_key_one(HANDLE rpc, const char *dataset_utf8,
+    const uint8_t *pass, uint32_t passlen)
+{
+	struct {
+	    op_load_key_one_req_t hdr;
+	    // trailing pass bytes…
+	} *pkt;
+
+	size_t pktsz = sizeof (op_load_key_one_req_t) + passlen + 1;
+	pkt = (void *)malloc(pktsz);
+	ZeroMemory(pkt, pktsz);
+
+	strlcpy(pkt->hdr.dataset, dataset_utf8, sizeof (pkt->hdr.dataset));
+	pkt->hdr.passlen = passlen;
+	if (passlen)
+		memcpy((uint8_t *)pkt + sizeof (op_load_key_one_req_t),
+		    pass, passlen + 1); // with NUL
+
+	uint8_t *out = NULL;
+	uint32_t st = 0, outlen = 0;
+	BOOL ok = zrpc_call(&g_rpc, OP_LOAD_KEY_ONE, pkt, (DWORD)pktsz,
+	    &st, &out, &outlen) && st == 0;
+	if (out) HeapFree(GetProcessHeap(), 0, out);
+
+	SecureZeroMemory(pkt, pktsz);
+	free(pkt);
+	return (ok);
+}
+
+static BOOL
+preflight_pool(const char *pool_utf8, char **out_json, uint32_t *out_len)
+{
+	op_mount_preflight_req_t rq = { 0 };
+	strlcpy(rq.pool_name, pool_utf8, sizeof (rq.pool_name));
+
+	uint32_t st = 0;
+	uint8_t *out = NULL;
+	uint32_t outlen = 0;
+	if (!zrpc_call(&g_rpc, OP_MOUNT_PREFLIGHT, &rq, sizeof (rq),
+	    &st, &out, &outlen) || st != 0 || !out)
+		return (FALSE);
+
+	*out_json = (char *)out;
+	*out_len = outlen;
+	return (TRUE); // caller frees *out_json
+}
+
+struct unlock_ctx {
+    HWND owner;
+    zrpc_t *rpc;
+    int any_failed;
+};
+
+static int
+unlock_cb(const char *ds_utf8, void *arg)
+{
+	struct unlock_ctx *c = (struct unlock_ctx *)arg;
+
+	dprintf("unlock_cb: dataset %s\n", ds_utf8);
+
+	wchar_t dsW[512];
+	MultiByteToWideChar(CP_UTF8, 0, ds_utf8, -1, dsW, _countof(dsW));
+
+	uint8_t *pass = NULL;
+	uint32_t passlen = 0;
+	if (!PromptPassphrase(c->owner, dsW, &pass, &passlen)) {
+		// user skipped this one; treat as failure to block mount
+		dprintf("unlock_cb: user cancelled for %s\n", ds_utf8);
+		c->any_failed = 1;
+		return (0); // continue with other roots
+	}
+
+	dprintf("unlock_cb: got passphrase for %s, len %u\n", ds_utf8, passlen);
+	BOOL ok = load_key_one(c->rpc, ds_utf8, pass, passlen);
+	SecureZeroMemory(pass, passlen);
+	HeapFree(GetProcessHeap(), 0, pass);
+
+	if (!ok) c->any_failed = 1;
+	return (0); // keep iterating
+}
+
+void
+mount_one_pool(HWND owner, const char *pool_name_utf8)
+{
+
+	dprintf("mount_one_pool: %s\n", pool_name_utf8);
+
+	// 1) PREFLIGHT
+	char *pf = NULL; uint32_t pfl = 0;
+	if (!preflight_pool(pool_name_utf8, &pf, &pfl)) {
+		MessageBoxW(owner,
+		    L"Preflight failed.",
+		    L"OpenZFS",
+		    MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	// Count locked roots (you already have for_each_locked)
+	int locked_count = for_each_locked(pf, (int)pfl, NULL, NULL);
+	dprintf("mount_one_pool: preflight shows %d locked datasets\n",
+	    locked_count);
+	// 2) Unlock if needed
+	if (locked_count > 0) {
+		struct unlock_ctx ctx = {
+		    .owner = owner,
+		    .rpc = &g_rpc,
+		    .any_failed = 0
+		};
+		(void) for_each_locked(pf, (int)pfl, unlock_cb, &ctx);
+
+		HeapFree(GetProcessHeap(), 0, pf);
+		pf = NULL;
+		pfl = 0;
+	}
+
+	HeapFree(GetProcessHeap(), 0, pf);
+
+	// 3) Mount if clear
+	op_mount_req_t mreq = { 0 };
+	strlcpy(mreq.pool_name, pool_name_utf8, sizeof (mreq.pool_name));
+
+	uint8_t *mout = NULL;
+	uint32_t mst = 0, moutlen = 0;
+
+	if (zrpc_call(&g_rpc, OP_MOUNT_POOL, &mreq, sizeof (mreq),
+	    &mst, &mout, &moutlen) && mst == 0 && mout) {
+		HeapFree(GetProcessHeap(), 0, mout);
+	} else {
+		MessageBoxW(owner,
+		    L"Mount failed.",
+		    L"OpenZFS",
+		    MB_OK | MB_ICONERROR);
+	}
+}
+
+static void
+ShowImportAndMountResult(HWND hWnd,
+    const uint8_t *out_import, uint32_t outlen_import,
+    const uint8_t *out_mount, uint32_t outlen_mount)
+{
+	// Convert import JSON > wide
+	int wlen_import = MultiByteToWideChar(CP_UTF8, 0,
+	    (const char *)out_import, (int)outlen_import, NULL, 0);
+	if (wlen_import <= 0) wlen_import = 0;
+
+	// Convert mount JSON > wide (may be NULL/empty)
+	int wlen_mount = 0;
+	if (out_mount && outlen_mount) {
+		wlen_mount = MultiByteToWideChar(CP_UTF8, 0,
+		    (const char *)out_mount, (int)outlen_mount, NULL, 0);
+		if (wlen_mount <= 0) wlen_mount = 0;
+	}
+
+	// Allocate one buffer: import + separator + mount + NUL
+	static const wchar_t *SEP = L"\r\n\r\n— Mount result —\r\n";
+	int sep_len = (out_mount && outlen_mount) ? (int)wcslen(SEP) : 0;
+	int total = wlen_import + sep_len + wlen_mount + 1;
+
+	wchar_t *wbuf = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
+	    total * sizeof (wchar_t));
+	if (!wbuf)
+		return;
+
+	int pos = 0;
+
+	// Fill import
+	if (wlen_import) {
+		(void) MultiByteToWideChar(CP_UTF8, 0,
+		    (const char *)out_import, (int)outlen_import,
+		    wbuf + pos, wlen_import);
+		pos += wlen_import;
+	}
+
+	// Separator only if we have mount output
+	if (sep_len) {
+		memcpy(wbuf + pos, SEP, sep_len * sizeof (wchar_t));
+		pos += sep_len;
+	}
+
+	// Fill mount
+	if (wlen_mount) {
+		(void) MultiByteToWideChar(CP_UTF8, 0,
+		    (const char *)out_mount, (int)outlen_mount,
+		    wbuf + pos, wlen_mount);
+		pos += wlen_mount;
+	}
+
+	wbuf[pos] = L'\0';
+
+	MessageBoxW(hWnd, wbuf, L"Import & Mount result",
+	    MB_OK | MB_ICONINFORMATION);
+	HeapFree(GetProcessHeap(), 0, wbuf);
+}
+
+static void
+mount_all_pools(HWND hWnd, uint8_t **out_mount, uint32_t *outlen_mount)
+{
+	uint32_t st = 0;
+
+	// === NEW: list imported pools and mount each ===
+	if (zrpc_call(&g_rpc, OP_LIST_POOLS, NULL, 0, &st, out_mount,
+	    outlen_mount) && st == 0 && *out_mount) {
+		// parse {"pools":[{"name":"...","guid":...}, ...]}
+
+		jsmn_parser p;
+		jsmntok_t tok[256];
+		jsmn_init(&p);
+		int n = jsmn_parse(&p, (const char *)*out_mount, *outlen_mount,
+		    tok, _countof(tok));
+		if (n > 0) {
+			// helper to iterate pool objects
+			for (int i = 1; i < n; i++) {
+				if (tok[i].type == JSMN_STRING &&
+				    jsmn_eq((const char *)*out_mount, &tok[i],
+				    "name") && (i + 1) < n &&
+				    tok[i + 1].type == JSMN_STRING) {
+
+					char name[128] = { 0 };
+					jsmn_copy_string((const char *)
+					    *out_mount, &tok[i + 1], name,
+					    sizeof (name));
+
+					// call OP_MOUNT_POOL for this pool
+					mount_one_pool(hWnd, name);
+
+				}
+			}
+		}
+	} else {
+		dprintf("%s: failed to list pools\n", __func__);
+	}
+}
+
+static void
+unmount_one_pool(const char *pool_name)
+{
+	const op_unmount_req_t ureq = { 0 };
+	strlcpy(ureq.pool_name, pool_name, sizeof (ureq.pool_name));
+	uint8_t *uout = NULL;
+	uint32_t ust = 0, uoutlen = 0;
+	dprintf("unmounting exported pool '%s'\n", pool_name);
+	if (zrpc_call(&g_rpc, OP_UNMOUNT_POOL, &ureq, sizeof (ureq),
+	    &ust, &uout, &uoutlen) && ust == 0 && uout) {
+		// optional: toast or log success per pool
+		HeapFree(GetProcessHeap(), 0, uout);
+	} else {
+		// optional: surface a concise error per pool
+	}
+}
+
+static void
+unmount_all_pools(uint8_t **out_unmount, uint32_t *outlen)
+{
+	uint32_t st = 0;
+	// === NEW: list imported pools and unmount each ===
+	if (zrpc_call(&g_rpc, OP_LIST_POOLS, NULL, 0, &st, out_unmount,
+	    outlen) && st == 0 && *out_unmount) {
+		// parse {"pools":[{"name":"...","guid":...}, ...]}
+		dprintf("parsing unmounted pools JSON\n");
+		jsmn_parser p;
+		jsmntok_t tok[256];
+		jsmn_init(&p);
+		int n = jsmn_parse(&p, (const char *)*out_unmount,
+		    *outlen, tok, _countof(tok));
+		dprintf("jsmn_parse returned %d tokens\n", n);
+		if (n > 0) {
+			// helper to iterate pool objects
+			for (int i = 1; i < n; i++) {
+				if (tok[i].type == JSMN_STRING &&
+				    jsmn_eq((const char *)*out_unmount, &tok[i],
+				    "name") && (i + 1) < n &&
+				    tok[i + 1].type == JSMN_STRING) {
+					char name[128] = { 0 };
+					jsmn_copy_string((const char *)
+					    *out_unmount, &tok[i + 1], name,
+					    sizeof (name));
+					// call OP_UNMOUNT_POOL for this pool
+					unmount_one_pool(name);
+				}
+			}
+		}
+	} else {
+		dprintf("%s: failed to list pools\n", __func__);
+	}
+}
+
+static char *
+utf16_to_utf8_alloc(const wchar_t *w)
+{
+	if (!w)
+		return (NULL);
+	int need = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+	if (need <= 0)
+		return (NULL);
+	char *u8 = (char *)HeapAlloc(GetProcessHeap(), 0, need);
+	if (!u8)
+		return (NULL);
+	int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, u8, need, NULL, NULL);
+	if (n <= 0) {
+		HeapFree(GetProcessHeap(), 0, u8);
+		return (NULL);
+	}
+	return (u8); // NUL-terminated
+}
+
 static LRESULT CALLBACK
 WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -421,25 +784,31 @@ WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			if (MessageBoxW(hWnd, L"Import all detectable pools?",
 			    L"OpenZFS", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
 				break;
+
 			op_import_all_req_t rq = { .flags = 0 };
-			uint8_t *out = NULL;
-			uint32_t st = 0, outlen = 0;
-			if (zrpc_call(&g_rpc, OP_IMPORT_ALL, &rq, sizeof (rq),
-			    &st, &out, &outlen) && st == 0 && out) {
-				// MVP: show JSON text
-				wchar_t w[2048] = { 0 };
-				MultiByteToWideChar(CP_UTF8, 0, (char *)out,
-				    (int)outlen, w, 2047);
-				MessageBoxW(hWnd, w, L"Import result",
-				    MB_OK | MB_ICONINFORMATION);
-				HeapFree(GetProcessHeap(), 0, out);
-			} else {
+			uint8_t *out_import = NULL;
+			uint8_t *out_mount = NULL;
+			uint32_t st = 0, outlen_import = 0, outlen_mount = 0;
+
+			if (!zrpc_call(&g_rpc, OP_IMPORT_ALL, &rq, sizeof (rq),
+			    &st, &out_import, &outlen_import) || st != 0) {
 				MessageBoxW(hWnd,
 				    L"Import failed or service unavailable.",
-				    L"OpenZFS", MB_OK | MB_ICONERROR);
+				    L"OpenZFS",
+				    MB_OK | MB_ICONERROR);
+				break;
 			}
-			break;
+
+			mount_all_pools(hWnd, &out_mount, &outlen_mount);
+
+			ShowImportAndMountResult(hWnd, out_import,
+			    outlen_import, out_mount, outlen_mount);
+
+			HeapFree(GetProcessHeap(), 0, out_mount);
+			HeapFree(GetProcessHeap(), 0, out_import);
+			return (0);
 		}
+
 
 		case IDM_IMPORT_WIN:
 		{
@@ -453,17 +822,20 @@ WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			    "Datasets will be unmounted.",
 			    L"OpenZFS", MB_OKCANCEL | MB_ICONWARNING) != IDOK)
 				break;
+
+			uint8_t *out_unmount = NULL;
+			uint32_t outlen_unmount = 0;
+			unmount_all_pools(&out_unmount, &outlen_unmount);
+
 			op_export_all_req_t rq = { .flags = 0 };
-			uint8_t *out = NULL;
-			uint32_t st = 0, outlen = 0;
+			uint8_t *out_export = NULL;
+			uint32_t st = 0, outlen_export = 0;
 			if (zrpc_call(&g_rpc, OP_EXPORT_ALL, &rq, sizeof (rq),
-			    &st, &out, &outlen) && st == 0 && out) {
-				wchar_t w[2048] = { 0 };
-				MultiByteToWideChar(CP_UTF8, 0, (char *)out,
-				    (int)outlen, w, 2047);
-				MessageBoxW(hWnd, w, L"Export result",
-				    MB_OK | MB_ICONINFORMATION);
-				HeapFree(GetProcessHeap(), 0, out);
+			    &st, &out_export, &outlen_export) && st == 0 &&
+			    out_export) {
+				ShowImportAndMountResult(hWnd, out_export,
+				    outlen_export, out_unmount, outlen_unmount);
+
 				RefreshPoolsFromService();
 			} else {
 				MessageBoxW(hWnd,
@@ -489,6 +861,14 @@ WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 					    MB_OKCANCEL | MB_ICONWARNING) !=
 					    IDOK)
 						return (0);
+
+					const char *pool = utf16_to_utf8_alloc(
+					    g_pool_names[idx]);
+					if (pool) {
+						unmount_one_pool(pool);
+						HeapFree(GetProcessHeap(), 0,
+						    (void *)pool);
+					}
 
 					op_export_one_req_t rq = { .flags = 0,
 					    .guid = g_pool_guids[idx]

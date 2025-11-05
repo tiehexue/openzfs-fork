@@ -10,7 +10,7 @@
 // Include after libzfs for dprintf
 #include "pipe_rpc.h"
 
-static libzfs_handle_t *g_lzh = NULL;
+extern libzfs_handle_t *g_lzh;
 
 #define	POOL_NAME_ONLY (1<<0)
 #define	POOL_NAME_GUID (1<<1)
@@ -177,7 +177,6 @@ build_status_nvlist(uint64_t flags)
 	append_fake_pool(root, flags);
 #endif
 
-	g_lzh = libzfs_init();
 	if (g_lzh) {
 		iter_ctx_t ctx = { root, flags, 0, 0 };
 		(void) zpool_iter(g_lzh, add_pool_cb, &ctx);
@@ -201,7 +200,6 @@ zed_status_json_build_by_guid(uint64_t guid, zfs_status_verbosity_t verb,
 		append_fake_pool(root, flags);
 #endif
 
-	g_lzh = libzfs_init();
 	if (g_lzh) {
 		iter_ctx_t ctx = { root, flags, guid, 0 };
 		(void) zpool_iter(g_lzh, add_pool_cb, &ctx);

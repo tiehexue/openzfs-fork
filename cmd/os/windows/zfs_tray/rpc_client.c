@@ -3,30 +3,57 @@
 // Include after libzfs for dprintf
 #include "pipe_rpc.h"
 
+static HANDLE
+zrpc_connect_once(const wchar_t *pipename, DWORD timeout_ms)
+{
+	// Try open directly first
+	HANDLE h = CreateFileW(pipename, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+	    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h != INVALID_HANDLE_VALUE)
+		return (h);
+
+	DWORD err = GetLastError();
+	if (err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND)
+		return (INVALID_HANDLE_VALUE);
+
+	// Wait for an instance to become available
+	if (!WaitNamedPipeW(pipename, timeout_ms))
+		return (INVALID_HANDLE_VALUE);
+
+	// Try again
+	return (CreateFileW(pipename, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+	    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
+}
+
+static BOOL
+zrpc_connect_with_retry(const wchar_t *pipename, HANDLE *ph)
+{
+	const int max_tries = 8;
+	const DWORD step_ms = 200; // total up to ~1.6s
+	for (int i = 0; i < max_tries; i++) {
+		HANDLE h = zrpc_connect_once(pipename, step_ms);
+		if (h != INVALID_HANDLE_VALUE) {
+			*ph = h;
+			return (TRUE);
+		}
+	}
+	return (FALSE);
+}
+
+
 static BOOL
 zrpc_connect(zrpc_t *c)
 {
+	HANDLE h;
 	if (c->h != INVALID_HANDLE_VALUE)
 		return (TRUE);
-	for (;;) {
-		HANDLE h = CreateFileW(c->name, GENERIC_READ|GENERIC_WRITE,
-		    0, NULL, OPEN_EXISTING,
-		    SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION |
-		    SECURITY_EFFECTIVE_ONLY | FILE_FLAG_OVERLAPPED, NULL);
 
-		if (h != INVALID_HANDLE_VALUE) {
-			c->h = h;
-			dprintf("%s: connected\n", __func__);
-			return (TRUE);
-		}
-		DWORD e = GetLastError();
-		if (e == ERROR_PIPE_BUSY) {
-			if (!WaitNamedPipeW(c->name, c->timeout_ms))
-				return (FALSE);
-			continue;
-		}
-		return (FALSE);
+	if (zrpc_connect_with_retry(c->name, &h)) {
+		c->h = h;
+		dprintf("%s: connected\n", __func__);
+		return (TRUE);
 	}
+	return (FALSE);
 }
 
 BOOL
@@ -43,6 +70,7 @@ void
 zrpc_close(zrpc_t *c)
 {
 	if (c->h != INVALID_HANDLE_VALUE) {
+		dprintf("%s: closing handle\n", __func__);
 		CloseHandle(c->h);
 		c->h = INVALID_HANDLE_VALUE;
 	}
@@ -74,14 +102,11 @@ write_all(HANDLE h, const void *buf, uint32_t len)
 	return (TRUE);
 }
 
-typedef struct { uint32_t op; uint32_t len; } rq_hdr_t;
-typedef struct { uint32_t status; uint32_t len; } rs_hdr_t;
-
 static BOOL
 do_call_once(zrpc_t *c, uint32_t op, const void *in, uint32_t in_len,
     uint32_t *status, uint8_t **out, uint32_t *out_len)
 {
-	rq_hdr_t rq = { op, in_len };
+	req_hdr_t rq = { op, in_len };
 
 	dprintf("%s: sending op %d\n", __func__, op);
 
@@ -91,7 +116,7 @@ do_call_once(zrpc_t *c, uint32_t op, const void *in, uint32_t in_len,
 	if (in_len && !write_all(c->h, in, in_len))
 		return (FALSE);
 
-	rs_hdr_t rs;
+	rsp_hdr_t rs;
 	if (!read_all(c->h, &rs, sizeof (rs), c->timeout_ms))
 		return (FALSE);
 
@@ -102,6 +127,7 @@ do_call_once(zrpc_t *c, uint32_t op, const void *in, uint32_t in_len,
 			return (FALSE);
 		if (!read_all(c->h, buf, rs.len, c->timeout_ms)) {
 			HeapFree(GetProcessHeap(), 0, buf);
+			dprintf("%s: read_all payload failed\n", __func__);
 			return (FALSE);
 		}
 	}
@@ -110,6 +136,11 @@ do_call_once(zrpc_t *c, uint32_t op, const void *in, uint32_t in_len,
 	else if (buf)
 		HeapFree(GetProcessHeap(), 0, buf);
 	if (out_len) *out_len = rs.len;
+	dprintf("recv hdr: err=%u size=%u\n", rs.status, rs.len);
+
+	// One thing per connection, one day fix?
+	zrpc_close(c);
+
 	return (TRUE);
 }
 
@@ -119,15 +150,22 @@ zrpc_call(zrpc_t *c, uint32_t op, const void *in, uint32_t in_len,
 {
 	dprintf("%s: call op %d \n", __func__, op);
 
-	if (!zrpc_connect(c))
-		return (FALSE);
+	if (!zrpc_connect(c)) {
+		Sleep(500);
+
+		if (!zrpc_connect(c))
+			return (FALSE);
+	}
+	dprintf("%s: connected %d \n", __func__, op);
 
 	if (do_call_once(c, op, in, in_len, status, out, out_len))
 		return (TRUE);
 
 	DWORD e = GetLastError();
+	dprintf("%s: GetLastError %x \n", __func__, e);
 	if (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED) {
 		zrpc_close(c);
+		Sleep(500);
 		if (!zrpc_connect(c))
 			return (FALSE);
 		return (do_call_once(c, op, in, in_len, status, out, out_len));

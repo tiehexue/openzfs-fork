@@ -30,6 +30,10 @@ typedef enum {
     OP_SUBSCRIBE_EVENTS = 6,
     OP_EXPORT_ALL = 7,
     OP_EXPORT_ONE = 8,
+    OP_MOUNT_POOL = 9,
+    OP_UNMOUNT_POOL = 10,
+    OP_MOUNT_PREFLIGHT = 11,
+    OP_LOAD_KEY_ONE = 12,
 } op_t;
 
 typedef struct {
@@ -97,5 +101,59 @@ typedef struct {
     uint64_t guid; // pool to export (we’ll resolve to a handle)
 } op_export_one_req_t;
 #pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t flags; // ZMNT_*
+    uint64_t pool_guid; // or 0 + pool_name[]
+    char pool_name[128]; // optional if you prefer names
+    char mntopts[256]; // optional comma-delimited, or "" (NULL ok too)
+} op_mount_req_t;
+
+typedef struct {
+    uint32_t flags; // ZUMNT_FORCE etc.
+    uint64_t pool_guid;
+    char pool_name[128];
+} op_unmount_req_t;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t flags; // reserved
+    uint64_t pool_guid; // 0 if using name
+    char pool_name[128]; // UTF-8
+    char dataset[512]; // leave empty for pool-scope
+} op_mount_preflight_req_t;
+
+typedef struct {
+    uint32_t flags; // reserved
+    char dataset[512]; // UTF-8 encroot name
+    uint32_t passlen; // trailing bytes
+} op_load_key_one_req_t;
+#pragma pack(pop)
+
+// Writes header + optional payload. Frees payload if 'do_free' is true.
+#define	RESP_EX(client, err, size_sz, payload_ptr, do_free) \
+	do { \
+		const void *__resp_pl = (payload_ptr); \
+		uint32_t __resp_sz_sz = (size_sz); \
+		uint32_t __resp_sz = (uint32_t)((__resp_sz_sz > 0xFFFFFFFFu) ? \
+		    0xFFFFFFFFu : __resp_sz_sz); \
+		rsp_hdr_t __rsp = { (uint32_t)(err), __resp_sz }; \
+		WriteAll((client), &__rsp, sizeof (__rsp)); \
+		if (__resp_sz && __resp_pl) \
+			WriteAll((client), __resp_pl, __resp_sz); \
+		if ((do_free) && __resp_pl) { \
+			HeapFree(GetProcessHeap(), 0, (void*)__resp_pl); \
+		} \
+	} while (0)
+
+// Common cases:
+#define	RESP_OK_JSON(client, size_sz, payload_ptr) do { \
+		RESP_EX(client, 0, (size_sz), (payload_ptr), TRUE); \
+		(payload_ptr) = NULL; \
+	} while (0)
+
+#define	RESP_ERR(client, win32err) RESP_EX(client, (win32err), 0, NULL, FALSE)
 
 #endif // OPENZFS_PIPE_RPC_H

@@ -11,11 +11,17 @@
 #include "ops_status.h"
 #include "ops_import.h"
 #include "ops_export.h"
+#include "ops_mount.h"
+#include "ops_crypto.h"
+#include "ops_common.h"
 
 // #include "rpc_dispatch.h" // your pipe dispatch function prototypes
 
 // Include after libzfs for dprintf
 #include "pipe_rpc.h"
+
+/* Global  libzfs handle provided by the service */
+libzfs_handle_t *g_lzh = NULL;
 
 // ---- service name
 static const wchar_t kServiceName[] = L"OpenZFS_tray";
@@ -327,6 +333,10 @@ ServiceMain_impl(BOOL is_service)
 {
 	DWORD rc = NO_ERROR;
 
+	g_lzh = libzfs_init();
+	if (!g_lzh)
+		goto out;
+
 	// stop event always exists
 	g_StopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (!g_StopEvent)
@@ -344,6 +354,8 @@ ServiceMain_impl(BOOL is_service)
 
 	rc = RunPipeServerLoop();
 
+out:
+
 	// shutdown
 	if (g_StopEvent) {
 		CloseHandle(g_StopEvent);
@@ -352,6 +364,12 @@ ServiceMain_impl(BOOL is_service)
 
 	if (is_service)
 		ReportSvcStatus(SERVICE_STOPPED, rc, 0);
+
+	if (g_lzh) {
+		libzfs_fini(g_lzh);
+		g_lzh = NULL;
+	}
+
 	return (rc);
 }
 
@@ -411,60 +429,6 @@ wmain(int argc, wchar_t **argv)
 }
 
 static DWORD
-ReadAll(HANDLE h, void *buf, DWORD need)
-{
-	DWORD got = 0, total = 0;
-	BYTE *p = (BYTE *)buf;
-	while (total < need) {
-		if (!ReadFile(h, p + total, need - total, &got, NULL))
-			return (GetLastError());
-		if (got == 0)
-			return (ERROR_BROKEN_PIPE);
-		total += got;
-	}
-	return (0);
-}
-
-
-static DWORD
-WriteAll(HANDLE h, const void *buf, DWORD len)
-{
-	DWORD put = 0, total = 0;
-	const BYTE *p = (const BYTE *)buf;
-	while (total < len) {
-		if (!WriteFile(h, p + total, len - total, &put, NULL))
-			return (GetLastError());
-		total += put;
-	}
-	return (0);
-}
-
-// Writes header + optional payload. Frees payload if 'do_free' is true.
-#define	RESP_EX(client, err, size_sz, payload_ptr, do_free) \
-	do { \
-		const void *__resp_pl = (payload_ptr); \
-		size_t __resp_sz_sz = (size_sz); \
-		uint32_t __resp_sz = (uint32_t)((__resp_sz_sz > 0xFFFFFFFFu) ? \
-		    0xFFFFFFFFu : __resp_sz_sz); \
-		rsp_hdr_t __rsp = { (uint32_t)(err), __resp_sz }; \
-		WriteAll((client), &__rsp, sizeof (__rsp)); \
-		if (__resp_sz && __resp_pl) \
-			WriteAll((client), __resp_pl, __resp_sz); \
-		if ((do_free) && __resp_pl) { \
-			HeapFree(GetProcessHeap(), 0, (void*)__resp_pl); \
-		} \
-	} while (0)
-
-// Common cases:
-#define	RESP_OK_JSON(client, size_sz, payload_ptr) do { \
-		RESP_EX(client, 0, (size_sz), (payload_ptr), TRUE); \
-		(payload_ptr) = NULL; \
-	} while (0)
-
-#define	RESP_ERR(client, win32err) RESP_EX(client, (win32err), 0, NULL, FALSE)
-
-
-static DWORD
 ClientWorker(HANDLE client, HANDLE event)
 {
 	req_hdr_t rh;
@@ -485,6 +449,11 @@ ClientWorker(HANDLE client, HANDLE event)
 			HeapFree(GetProcessHeap(), 0, payload);
 			return (err);
 		}
+	}
+
+	if (!IsCallerAdmin(client)) {
+		RESP_ERR(client, ERROR_ACCESS_DENIED);
+		return (ERROR_ACCESS_DENIED);
 	}
 
 	// Minimal dispatch: only GET_STATUS and SUBSCRIBE_EVENTS
@@ -533,11 +502,6 @@ ClientWorker(HANDLE client, HANDLE event)
 
 	case OP_IMPORT_ONE:
 		{
-			if (!IsCallerAdmin(client)) {
-				RESP_ERR(client, ERROR_ACCESS_DENIED);
-				break;
-			}
-
 			// body:
 			// op_import_one_req_t + new_name(NUL) + altroot(NUL)
 			if (rh.len < sizeof (op_import_one_req_t)) {
@@ -571,12 +535,7 @@ ClientWorker(HANDLE client, HANDLE event)
 	case OP_IMPORT_ALL:
 		{
 			dprintf("OP_IMPORT_ALL\n");
-			if (!IsCallerAdmin(client)) {
-				RESP_ERR(client, ERROR_ACCESS_DENIED);
-				break;
-			}
 
-			dprintf("OP_IMPORT_ALL send\n");
 			// body: op_import_all_req_t + optional altroot(NUL)
 			op_import_all_req_t req = { 0 };
 			const char *altroot = NULL;
@@ -602,10 +561,8 @@ ClientWorker(HANDLE client, HANDLE event)
 
 	case OP_EXPORT_ONE:
 		{
-			if (!IsCallerAdmin(client)) {
-				RESP_ERR(client, ERROR_ACCESS_DENIED);
-				break;
-			}
+			dprintf("OP_EXPORT_ONE\n");
+
 			if (rh.len < sizeof (op_export_one_req_t)) {
 				RESP_ERR(client, ERROR_INVALID_PARAMETER);
 				break;
@@ -624,10 +581,8 @@ ClientWorker(HANDLE client, HANDLE event)
 
 	case OP_EXPORT_ALL:
 		{
-			if (!IsCallerAdmin(client)) {
-				RESP_ERR(client, ERROR_ACCESS_DENIED);
-				break;
-			}
+			dprintf("OP_EXPORT_ALL\n");
+
 			op_export_all_req_t req = { 0 };
 			if (rh.len >= sizeof (req))
 				memcpy(&req, payload, sizeof (req));
@@ -640,6 +595,95 @@ ClientWorker(HANDLE client, HANDLE event)
 			RESP_OK_JSON(client, jlen, json);
 			break;
 		}
+
+	case OP_MOUNT_POOL:
+		{
+			dprintf("OP_MOUNT_POOL\n");
+			if (rh.len < sizeof (op_mount_req_t)) {
+				RESP_ERR(client, ERROR_GEN_FAILURE);
+				break;
+			}
+
+			const op_mount_req_t *req = (const void *)payload;
+			nvlist_t *res = zed_mount_pool_nvl(req->pool_guid,
+			    req->pool_name, NULL, req->flags);
+			RESP_OK_NVL(client, res);
+			break;
+		}
+
+	case OP_UNMOUNT_POOL:
+		{
+			dprintf("OP_UNMOUNT_POOL\n");
+			if (rh.len < sizeof (op_unmount_req_t)) {
+				RESP_ERR(client, ERROR_GEN_FAILURE);
+				break;
+			}
+
+			const op_unmount_req_t *req = (const void *)payload;
+			nvlist_t *res = zed_unmount_pool_nvl(req->pool_guid,
+			    req->pool_name, req->flags);
+			RESP_OK_NVL(client, res);
+			break;
+		}
+	case OP_MOUNT_PREFLIGHT:
+		{
+			dprintf("OP_MOUNT_PREFLIGHT\n");
+
+			if (rh.len < sizeof (op_mount_preflight_req_t)) {
+				RESP_ERR(client, ERROR_GEN_FAILURE);
+				break;
+			}
+
+			const op_mount_preflight_req_t *req =
+			    (const void *)payload;
+
+			nvlist_t *res = NULL;
+			if (req->dataset[0] != '\0') {
+				dprintf("OP_MOUNT_PREFLIGHT: dataset='%s'\n",
+				    req->dataset);
+				res = zed_mount_preflight_dataset_nvl(g_lzh,
+				    req->dataset);
+			} else {
+				const char *pname =
+				    req->pool_name[0] ? req->pool_name : NULL;
+				dprintf("OP_MOUNT_PREFLIGHT: pool='%s'\n",
+				    pname ? pname : "(null)");
+				res = zed_mount_preflight_pool_nvl(g_lzh,
+				    pname);
+			}
+
+			RESP_OK_NVL(client, res);
+			break;
+		}
+
+	case OP_LOAD_KEY_ONE:
+		{
+			dprintf("OP_LOAD_KEY_ONE\n");
+
+			if (rh.len < sizeof (op_load_key_one_req_t)) {
+				RESP_ERR(client, ERROR_GEN_FAILURE);
+				break;
+			}
+
+			const op_load_key_one_req_t *req =
+			    (const void *)payload;
+			const char *pass =
+			    (const char *)payload +
+			    sizeof (op_load_key_one_req_t);
+
+			// Always null-terminate?
+
+			nvlist_t *res = zed_load_key_one_nvl(g_lzh,
+			    req->dataset,
+			    pass,
+			    req->passlen);
+
+			SecureZeroMemory(pass, req->passlen);
+
+			RESP_OK_NVL(client, res);
+			break;
+		}
+
 
 	case OP_SUBSCRIBE_EVENTS:
 		{

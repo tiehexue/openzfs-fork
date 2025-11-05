@@ -11,7 +11,7 @@
 #include "pipe_rpc.h"
 
 /* Global libzfs handle provided by the service */
-static libzfs_handle_t *g_lzh = NULL;
+extern libzfs_handle_t *g_lzh;
 
 static void
 add_ok_err(nvlist_t *dst, int ok, const char *name, const char *err)
@@ -27,9 +27,9 @@ export_one_handle(zpool_handle_t *zhp, uint32_t flags)
 {
 	int rc = -1;
 
-	rc = zpool_disable_datasets(zhp, B_FALSE);
-	if (rc)
-		return (rc);
+//	rc = zpool_disable_datasets(zhp, B_FALSE);
+//	if (rc)
+//		return (rc);
 
 	rc = zpool_export(zhp,
 	    (flags & ZEXP_FORCE) ? B_TRUE : B_FALSE,
@@ -85,17 +85,6 @@ zed_export_one_json(uint32_t flags, uint64_t guid, size_t *out_len)
 		return (memfile_take(&mf, out_len));
 	}
 #endif
-
-	g_lzh = libzfs_init();
-	if (!g_lzh) {
-		add_ok_err(res, 0, NULL, "libzfs_init not available");
-		memfile_t mf;
-		FILE *fp = memfile_open(&mf);
-		nvlist_print_json(fp, res);
-		fclose(fp);
-		fnvlist_free(res);
-		return (memfile_take(&mf, out_len));
-	}
 
 	find_by_guid_ctx_t ctx;
 	ctx.want_guid = guid;
@@ -189,15 +178,12 @@ zed_export_all_json(uint32_t flags, size_t *out_len)
 	}
 #endif
 
-	g_lzh = libzfs_init();
-	if (g_lzh) {
-		export_all_ctx_t ctx;
-		ctx.lzh = g_lzh;
-		ctx.root = root;
-		ctx.flags = flags;
+	export_all_ctx_t ctx;
+	ctx.lzh = g_lzh;
+	ctx.root = root;
+	ctx.flags = flags;
 
-		(void) zpool_iter(g_lzh, export_all_cb, &ctx);
-	}
+	(void) zpool_iter(g_lzh, export_all_cb, &ctx);
 
 	memfile_t mf;
 	FILE *fp = memfile_open(&mf);
