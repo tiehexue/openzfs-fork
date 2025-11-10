@@ -113,69 +113,12 @@ add_pool_cb(zpool_handle_t *zhp, void *cookie)
 	return ((ctx->guid_filter != 0) ? 1 : 0);
 }
 
-#ifdef ENABLE_FAKE_POOLS
-static void
-append_fake_pool(nvlist_t *root, uint64_t flags)
-{
-	nvlist_t *p = fnvlist_alloc();
-	nvlist_t *child = NULL;
-	nvlist_t *vroot = NULL;
-
-	fnvlist_add_string(p, "name", "FAKE");
-	if (flags & POOL_NAME_ONLY)
-		goto out;
-
-	fnvlist_add_uint64(p, "guid", 0xF00DFADEFACEULL);
-	if (flags & POOL_NAME_GUID)
-		goto out;
-
-	fnvlist_add_string(p, "health", "ONLINE");
-	fnvlist_add_string(p, "size", "931G");
-	fnvlist_add_string(p, "alloc", "420G");
-	fnvlist_add_string(p, "free", "511G");
-	fnvlist_add_string(p, "capacity_pct", "45");
-
-	// Minimal vdev_tree so UI code that expects it won’t crash
-	vroot = fnvlist_alloc();
-	fnvlist_add_string(vroot, "type", "root");
-	fnvlist_add_string(vroot, "path", "FAKE");
-	fnvlist_add_string(vroot, "is_log", "0");
-
-	child = fnvlist_alloc();
-	fnvlist_add_string(child, "type", "disk");
-	fnvlist_add_string(child, "path", "\\\\?\\PHYSICALDRIVE2");
-	fnvlist_add_string(child, "state", "ONLINE");
-	fnvlist_add_uint64(child, "asize", 1000ULL * 1024 * 1024 * 1024ULL);
-
-	const nvlist_t *kids[1] = { child };
-	fnvlist_add_nvlist_array(vroot, "children", kids, 1);
-
-	fnvlist_add_nvlist(p, "vdev_tree", vroot);
-
-out:
-	{
-		const nvlist_t *one[1] = { p };
-		fnvlist_add_nvlist_array(root, "pools", one, 1);
-	}
-
-	if (child)
-		fnvlist_free(child);
-	if (vroot)
-		fnvlist_free(vroot);
-	fnvlist_free(p);
-}
-#endif
-
 static nvlist_t *
 build_status_nvlist(uint64_t flags)
 {
 	nvlist_t *root = fnvlist_alloc();
 	// Initialize empty array so appends work
 	fnvlist_add_nvlist_array(root, "pools", NULL, 0);
-
-#ifdef ENABLE_FAKE_POOLS
-	append_fake_pool(root, flags);
-#endif
 
 	if (g_lzh) {
 		iter_ctx_t ctx = { root, flags, 0, 0 };
@@ -194,11 +137,6 @@ zed_status_json_build_by_guid(uint64_t guid, zfs_status_verbosity_t verb,
 	unsigned flags = 0;
 	if (verb >= ZFSV_INCLUDE_VDEVS)
 		flags |= POOL_INCLUDE_VDEVS;
-
-#ifdef ENABLE_FAKE_POOLS
-	if (guid == 0xF00DFADEFACEULL)
-		append_fake_pool(root, flags);
-#endif
 
 	if (g_lzh) {
 		iter_ctx_t ctx = { root, flags, guid, 0 };

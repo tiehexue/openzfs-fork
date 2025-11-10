@@ -74,18 +74,6 @@ zed_export_one_json(uint32_t flags, uint64_t guid, size_t *out_len)
 	nvlist_t *res = fnvlist_alloc();
 	add_ok_err(res, 0, NULL, NULL);
 
-#ifdef ENABLE_FAKE_POOLS
-	if (guid == 0xF00DFADEFACEULL) {
-		add_ok_err(res, 1, "FAKE", NULL);
-		memfile_t mf;
-		FILE *fp = memfile_open(&mf);
-		nvlist_print_json(fp, res);
-		fclose(fp);
-		fnvlist_free(res);
-		return (memfile_take(&mf, out_len));
-	}
-#endif
-
 	find_by_guid_ctx_t ctx;
 	ctx.want_guid = guid;
 	ctx.found = NULL;
@@ -170,13 +158,6 @@ zed_export_all_json(uint32_t flags, size_t *out_len)
 	nvlist_t *root = fnvlist_alloc();
 	fnvlist_add_string_array(root, "exported", NULL, 0);
 	fnvlist_add_nvlist_array(root, "errors", NULL, 0);
-
-#ifdef ENABLE_FAKE_POOLS
-	{
-		const char *one[1] = { "FAKE" };
-		fnvlist_add_string_array(root, "exported", one, 1);
-	}
-#endif
 
 	export_all_ctx_t ctx;
 	ctx.lzh = g_lzh;

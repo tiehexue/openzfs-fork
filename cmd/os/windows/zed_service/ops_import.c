@@ -46,18 +46,6 @@ zed_import_scan_json(size_t *out_len)
 	nvlist_t *root = fnvlist_alloc();
 	fnvlist_add_nvlist_array(root, "candidates", NULL, 0);
 
-#ifdef ENABLE_FAKE_POOLS
-	{
-		nvlist_t *c = fnvlist_alloc();
-		fnvlist_add_string(c, "name", "FAKE_IMPORT");
-		add_guid_string(c, 0xF00DFADEFACEULL);
-		fnvlist_add_string(c, "state", "2");
-		const nvlist_t *one[1] = { c };
-		fnvlist_add_nvlist_array(root, "candidates", one, 1);
-		fnvlist_free(c);
-	}
-#endif
-
 	dprintf("%s: \n", __func__);
 
 	importargs_t ia = { 0 };
@@ -176,16 +164,6 @@ zed_import_one_json(uint32_t flags, uint64_t guid,
 	nvlist_t *res = fnvlist_alloc();
 	fnvlist_add_boolean_value(res, "ok", B_FALSE);
 
-#ifdef ENABLE_FAKE_POOLS
-	if (guid == 0xF00DFADEFACEULL) {
-		fnvlist_add_boolean_value(res, "ok", B_TRUE);
-		fnvlist_add_string(res, "name",
-		    (new_name_utf8 && *new_name_utf8) ? new_name_utf8 :
-		    "FAKE_IMPORT");
-		goto serialize;
-	}
-#endif
-
 	importargs_t ia = { 0 };
 	ia.scan = B_FALSE;
 	ia.can_be_active = (flags & ZIMP_FORCE) ? B_TRUE : B_FALSE;
@@ -280,14 +258,6 @@ zed_import_all_json(uint32_t flags, const char *altroot_utf8,
 	nvlist_t *res = fnvlist_alloc();
 	fnvlist_add_string_array(res, "imported", NULL, 0);
 	fnvlist_add_nvlist_array(res, "errors", NULL, 0);
-
-#ifdef ENABLE_FAKE_POOLSXXX
-	{
-		const char *one[1] = { "FAKE_IMPORT" };
-		fnvlist_add_string_array(res, "imported", one, 1);
-		goto serialize;
-	}
-#endif
 
 	importargs_t ia = { 0 };
 	ia.scan = B_FALSE;

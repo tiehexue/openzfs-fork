@@ -15,9 +15,6 @@ dprintf(const char *fmt, ...)
 	OutputDebugStringA(buf);
 }
 
-// Add in fake pools so we can test UI without a real pool
-#define	ENABLE_FAKE_POOLS 1
-
 #define	OPENZFS_PIPE_NAME "\\\\.\\pipe\\openzfs_zed"
 
 #pragma pack(push, 1)
