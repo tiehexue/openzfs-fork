@@ -203,6 +203,8 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	uint64_t capacity = 0, blksz = 0, pbsize = 0;
 	int isssd;
 	char *vdev_path = NULL;
+	uint8_t *FileName = NULL;
+	uint32_t FileLength;
 
 	PAGED_CODE();
 
@@ -248,8 +250,6 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	 * specified path.
 	 */
 	NTSTATUS ntstatus;
-	uint8_t *FileName = NULL;
-	uint32_t FileLength;
 
 	// Use vd->vdev_physpath first, if set, otherwise
 	// usual vd->vdev_path
@@ -564,7 +564,8 @@ skip_open:
 	    vd->vdev_nonrot, vd->vdev_has_trim, vd->vdev_has_securetrim);
 
 	// Now check if the FileName is PHYSICALDRIVEx, then fix it
-	if (FileName[0] == '\\' &&
+	if (FileName != NULL &&
+	    FileName[0] == '\\' &&
 	    FileName[1] == '?' &&
 	    FileName[2] == '?' &&
 	    FileName[3] == '\\' &&
