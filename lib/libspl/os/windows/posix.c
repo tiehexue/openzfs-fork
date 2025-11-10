@@ -1621,6 +1621,7 @@ wosix_fopen(const char *name, const char *mode)
 		return (NULL);
 	}
 
+	fFILE->magic = WFUNOPEN_MAGIC;
 	fFILE->realFILE = fp;
 	return ((FILE *)fFILE);
 }
