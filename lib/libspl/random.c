@@ -33,6 +33,7 @@
 #include "libspl_impl.h"
 
 static int random_fd = -1, urandom_fd = -1;
+static boolean_t force_pseudo = B_FALSE;
 
 #ifndef _WIN32
 
@@ -117,9 +118,17 @@ random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
 
 #endif /* Windows */
 
+void
+random_force_pseudo(boolean_t onoff)
+{
+	force_pseudo = onoff;
+}
+
 int
 random_get_bytes(uint8_t *ptr, size_t len)
 {
+	if (force_pseudo)
+		return (random_get_pseudo_bytes(ptr, len));
 	return (random_get_bytes_common(ptr, len, random_fd));
 }
 
