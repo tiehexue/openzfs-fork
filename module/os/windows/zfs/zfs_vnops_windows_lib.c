@@ -4122,6 +4122,12 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
  *
  *	NOTE: The RootDirectory handle thing never happens, and no sample
  * source (including fastfat) handles it.
+ *
+ * Oh so, we can get a second FileObject in
+ * IrpSp->Parameters.SetFile.FileObject, this is the FO of the destination
+ * Directory. If it is set, we only use the last part of the filename.
+ *
+ * It is also allowed to end the name with "\\", then we should strip that.
  */
 
 	FILE_RENAME_INFORMATION *ren = Irp->AssociatedIrp.SystemBuffer;
@@ -4178,6 +4184,11 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	buffer[outlen] = 0;
 	filename = buffer;
 
+	// If it ends with "\", strip it.
+	if (outlen > 0 &&
+	    buffer[outlen - 1] == '\\')
+		buffer[outlen - 1] = 0;
+
 	// Filename is often "\??\E:\lower\name" - and "/lower" might be
 	// another dataset so we need to drive a lookup, with
 	// SL_OPEN_TARGET_DIRECTORY set so we get the parent of where
@@ -4187,8 +4198,12 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	/* Quick check to see if it ends in reserved names */
 	char *tail;
 	tail = strrchr(filename, '\\');
-	if (tail == NULL)
+	if (tail == NULL) {
 		tail = filename;
+	} else {
+		tail++;
+		filename = tail;
+	}
 
 	if (strchr(tail, ':')) {
 		dprintf("file rename to stream should be implemented!\n");
@@ -4209,9 +4224,30 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	    !strcasecmp("casesensitive", tail))
 		return (STATUS_OBJECT_NAME_INVALID);
 
+	// If given Target Directory FileObject, it is easy
+	if (IrpSp->Parameters.SetFile.FileObject != NULL) {
+
+		dFileObject = IrpSp->Parameters.SetFile.FileObject;
+		tdvp = dFileObject->FsContext;
+		tdccb = dFileObject->FsContext2;
+
+		// We have tdvp held from the FileObject
+		VN_HOLD(tdvp);
+
+		error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder,
+		    &tdvp, &tvp, 0, 0);
+
+		dFileObject = NULL; // Dont ObDereference later
+
+		if (error) {
+			Status = STATUS_OBJECTID_NOT_FOUND;
+			tdvp = NULL; // did not hold, dont rele
+			goto out;
+		}
+
 	// If it starts with "\" drive the lookup, if it is just a name
 	// like "HEAD", assume tdvp is same as fdvp.
-	if (filename[0] == '\\') {
+	} else if (filename[0] == '\\') {
 		OBJECT_ATTRIBUTES oa;
 		IO_STATUS_BLOCK ioStatus;
 		UNICODE_STRING uFileName;
@@ -4266,13 +4302,8 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		// Filename is '\??\E:\dir\dir\file' and we only care about
 		// the last part.
-		char *r = strrchr(filename, '\\');
-		if (r == NULL)
-			r = strrchr(filename, '/');
-		if (r != NULL) {
-			r++;
-			filename = r;
-		}
+		if (tail)
+			filename = tail;
 
 		error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder,
 		    &tdvp, &tvp, 0, 0);
