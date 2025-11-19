@@ -753,6 +753,8 @@ vdev_disk_io_intr(PDEVICE_OBJECT DeviceObject, PIRP irp, PVOID Context)
  */
 
 	VERIFY3P(zio->windows.work_item, !=, NULL);
+	zio->windows.completion_called = B_TRUE;
+
 	IoQueueWorkItem(zio->windows.work_item,
 	    (PIO_WORKITEM_ROUTINE)vdev_disk_io_start_done,
 	    DelayedWorkQueue, zio);
@@ -924,6 +926,7 @@ vdev_disk_io_start(zio_t *zio)
 	}
 
 	zio->windows.irp = irp;
+	zio->windows.completion_called = B_FALSE;
 
 	irpStack = IoGetNextIrpStackLocation(irp);
 
@@ -937,8 +940,18 @@ vdev_disk_io_start(zio_t *zio)
 	    TRUE,  // On Error
 	    TRUE); // On Cancel
 
-	IoCallDriver(dvd->vd_DeviceObject, irp);
+	NTSTATUS Status;
+	Status = IoCallDriver(dvd->vd_DeviceObject, irp);
 
+	// IO is in progress asynchronously...
+	if (Status == STATUS_PENDING)
+		return;
+
+	// IO completed synchronously or failed to start
+	// we clean up manually, assuming the completion
+	// callback was not called.
+	if (!zio->windows.completion_called)
+		vdev_disk_io_start_done(NULL, zio);
 }
 
 static void
