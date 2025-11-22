@@ -1255,6 +1255,48 @@ zfs_readdir_emitdir(zfsvfs_t *zfsvfs, const char *name, emitdir_ptr_t *ctx,
 		fiebdi->FileNameLength = namelenholder;
 		break;
 
+	case FileIdAllExtdBothDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_ID_ALL_EXTD_BOTH_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_ID_ALL_EXTD_BOTH_DIR_INFORMATION *fiaebdi =
+		    (FILE_ID_ALL_EXTD_BOTH_DIR_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fiebdi->NextEntryOffset;
+
+		fiaebdi->FileIndex = ctx->offset;
+		fiaebdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fiaebdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fiaebdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fiaebdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fiaebdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fiaebdi->LastAccessTime.QuadPart);
+		fiaebdi->EaSize = ea_size;
+		fiaebdi->ReparsePointTag = reparse_tag;
+		fiaebdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fiaebdi->ShortNameLength = 0;
+		fiaebdi->FileId.QuadPart = tzp->z_id;
+
+		RtlCopyMemory(&fiaebdi->FileId128.Identifier[0], &tzp->z_id,
+		    sizeof (UINT64));
+		guid = dmu_objset_fsid_guid(zfsvfs->z_os);
+		RtlCopyMemory(&fiaebdi->FileId128.Identifier[sizeof (UINT64)],
+		    &guid, sizeof (UINT64));
+		nameptr = fiaebdi->FileName;
+		fiaebdi->FileNameLength = namelenholder;
+		break;
+
 	default:
 		panic("%s unknown listing type %d\n",
 		    __func__, ctx->dirlisttype);

@@ -1374,6 +1374,7 @@ zfs_readdir(vnode_t *vp, emitdir_ptr_t *ctx, cred_t *cr, zfs_ccb_t *zccb,
 	case FileObjectIdInformation:
 	case FileIdExtdDirectoryInformation:
 	case FileIdExtdBothDirectoryInformation:
+	case FileIdAllExtdBothDirectoryInformation:
 		break;
 	default:
 		dprintf("%s: ** Directory type %d not handled!\n",
