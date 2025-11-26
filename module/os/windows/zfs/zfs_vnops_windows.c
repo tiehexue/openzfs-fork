@@ -3654,20 +3654,55 @@ LockUserBuffer(
 	return (B_TRUE);
 }
 
-
-PVOID
-MapUserBuffer(IN OUT PIRP Irp)
+void *
+MapUserBuffer(
+    PIRP Irp,
+    ULONG Length,
+    LOCK_OPERATION AccessMode,
+    PMDL *outMdl)
 {
-	//
-	// If there is no Mdl, then we must be in the Fsd, and we can simply
-	// return the UserBuffer field from the Irp.
-	//
-	if (Irp->MdlAddress == NULL) {
+	PMDL mdl;
+
+	if (outMdl)
+		*outMdl = NULL;  // default: "nothing to free later"
+
+	mdl = Irp->MdlAddress;
+	if (mdl != NULL) {
+		return (MmGetSystemAddressForMdlSafe(mdl,
+		    NormalPagePriority | MdlMappingNoExecute));
+	}
+
+	// Kernel caller, no MDL: treat UserBuffer as a real kernel VA.
+	// Or if no outMdl passed along, assume caller handles it. read/write
+	if (Irp->RequestorMode == KernelMode || !outMdl) {
 		return (Irp->UserBuffer);
-	} else {
-		PVOID Address = MmGetSystemAddressForMdlSafe(Irp->MdlAddress,
-		    NormalPagePriority | MdlMappingNoExecute);
-		return (Address);
+	}
+
+	// User-mode + no MDL: we must build one.
+	mdl = IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, NULL);
+	if (mdl == NULL)
+		return (NULL);
+
+	__try {
+		MmProbeAndLockPages(mdl, UserMode, AccessMode);
+	}
+	__except(EXCEPTION_EXECUTE_HANDLER) {
+		IoFreeMdl(mdl);
+		return (NULL);
+	}
+
+	*outMdl = mdl;   // we own this, caller must unlock+free later.
+
+	return (MmGetSystemAddressForMdlSafe(mdl,
+	    NormalPagePriority | MdlMappingNoExecute));
+}
+
+void
+UnMapUserBuffer(PMDL mdl)
+{
+	if (mdl) {
+		MmUnlockPages(mdl);
+		IoFreeMdl(mdl);
 	}
 }
 
@@ -3683,7 +3718,7 @@ BufferUserBuffer(IN OUT PIRP Irp, IN ULONG BufferLength)
 	//  describing the users input buffer, which we will now snapshot.
 	//
 	if (Irp->AssociatedIrp.SystemBuffer == NULL) {
-		UserBuffer = MapUserBuffer(Irp);
+		UserBuffer = MapUserBuffer(Irp, 0, 0, NULL);
 		Irp->AssociatedIrp.SystemBuffer =
 		    FsRtlAllocatePoolWithQuotaTag(NonPagedPoolNx,
 		    BufferLength,
@@ -3747,6 +3782,8 @@ query_ea(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	FILE_FULL_EA_INFORMATION *previous_ea = NULL;
 	uint64_t spaceused = 0;
 	znode_t *zp = NULL;
+	PMDL mdl = NULL;
+
 	// zfsvfs_t *zfsvfs = NULL;
 	int overflow = 0;
 
@@ -3771,16 +3808,19 @@ query_ea(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	dprintf("%s\n", __func__);
 
-	Buffer = MapUserBuffer(Irp);
+	Buffer = MapUserBuffer(Irp, IrpSp->Parameters.QueryEa.Length,
+	    IoWriteAccess, &mdl);
 
 	if (UserBufferLength < sizeof (FILE_FULL_EA_INFORMATION)) {
 
 		if (UserBufferLength == 0) {
 			Irp->IoStatus.Information = 0;
+			UnMapUserBuffer(mdl);
 			return (STATUS_NO_MORE_EAS);
 		}
 
 		Irp->IoStatus.Information = sizeof (FILE_FULL_EA_INFORMATION);
+		UnMapUserBuffer(mdl);
 		return (STATUS_BUFFER_OVERFLOW);
 		// Docs say to return too-small, but some callers get stuck
 		// calling this in a cpu loop if we return it.
@@ -3826,6 +3866,7 @@ query_ea(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 			/* bounds check: offset is on INPUT list */
 			if (offset > UserEaListLength) {
 				if (xdvp) VN_RELE(xdvp);
+				UnMapUserBuffer(mdl);
 				return (STATUS_INVALID_PARAMETER);
 			}
 
@@ -3833,6 +3874,7 @@ query_ea(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 			if (offset + ea->EaNameLength > UserEaListLength) {
 				if (xdvp) VN_RELE(xdvp);
+				UnMapUserBuffer(mdl);
 				return (STATUS_INVALID_PARAMETER);
 			}
 
@@ -3886,6 +3928,8 @@ out:
 		Status = STATUS_BUFFER_OVERFLOW;
 	else if (spaceused == 0 && Status == 0)
 		Status = STATUS_NO_EAS_ON_FILE;
+
+	UnMapUserBuffer(mdl);
 
 	return (Status);
 }
@@ -4893,8 +4937,11 @@ user_fs_request(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 	case FSCTL_IS_VOLUME_DIRTY:
 		dprintf("    FSCTL_IS_VOLUME_DIRTY\n");
 		PULONG VolumeState;
+		PMDL mdl = NULL;
 
-		VolumeState = MapUserBuffer(Irp);
+		VolumeState = MapUserBuffer(Irp,
+		    IrpSp->Parameters.FileSystemControl.OutputBufferLength,
+		    IoWriteAccess, &mdl);
 
 		if (VolumeState == NULL) {
 			Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -4904,6 +4951,7 @@ user_fs_request(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		if (IrpSp->Parameters.FileSystemControl.OutputBufferLength <
 		    sizeof (ULONG)) {
 			Status = STATUS_INVALID_PARAMETER;
+			UnMapUserBuffer(mdl);
 			break;
 		}
 
@@ -4911,6 +4959,7 @@ user_fs_request(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
 		if (0)
 			SetFlag(*VolumeState, VOLUME_IS_DIRTY);
 		Irp->IoStatus.Information = sizeof (ULONG);
+		UnMapUserBuffer(mdl);
 		Status = STATUS_SUCCESS;
 		break;
 	case FSCTL_GET_REPARSE_POINT:
@@ -5135,6 +5184,7 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 	mount_t *zmo;
 	zfsvfs_t *zfsvfs;
 	NTSTATUS Status = STATUS_NO_SUCH_FILE;
+	PMDL mdl = NULL;
 
 	if ((Irp->UserBuffer == NULL && Irp->MdlAddress == NULL) ||
 	    IrpSp->Parameters.QueryDirectory.Length <= 0)
@@ -5171,7 +5221,8 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 		return (STATUS_NO_MORE_FILES);
 
 	struct iovec iov;
-	void *SystemBuffer = MapUserBuffer(Irp);
+	void *SystemBuffer = MapUserBuffer(Irp,
+	    IrpSp->Parameters.QueryDirectory.Length, IoWriteAccess, &mdl);
 	iov.iov_base = (void *)SystemBuffer;
 	iov.iov_len = IrpSp->Parameters.QueryDirectory.Length;
 
@@ -5185,8 +5236,10 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 
 	zfsvfs = vfs_fsprivate(zmo); // or from zp
 
-	if (!zfsvfs)
+	if (!zfsvfs) {
+		UnMapUserBuffer(mdl);
 		return (STATUS_INTERNAL_ERROR);
+	}
 
 	if (zccb->searchname.Buffer == NULL)
 		initial = B_TRUE;
@@ -5227,8 +5280,10 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 		    IrpSp->Parameters.QueryDirectory.FileName);
 
 		/* why? */
-		if (!zccb->ContainsWildCards && !initial)
+		if (!zccb->ContainsWildCards && !initial) {
+			UnMapUserBuffer(mdl);
 			return (STATUS_NO_MORE_FILES);
+		}
 
 		// If exists, we should free before setting
 		if (zccb->searchname.Buffer != NULL)
@@ -5324,6 +5379,8 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 	}
 
 	kmem_free(ctx.alloc_buf, ctx.bufsize);
+
+	UnMapUserBuffer(mdl);
 
 	return (Status);
 }
@@ -5674,7 +5731,7 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 		return (Status);
 	}
 
-	data = MapUserBuffer(Irp);
+	data = MapUserBuffer(Irp, 0, 0, NULL);
 	// vp->FileHeader.Flags2 & FSRTL_FLAG2_IS_PAGING_FILE ?
 	// HighPagePriority : NormalPagePriority);
 
@@ -6396,7 +6453,7 @@ fs_write_impl(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp,
 	}
 
 	if (!Irp->AssociatedIrp.SystemBuffer) {
-		buf = MapUserBuffer(Irp);
+		buf = MapUserBuffer(Irp, 0, 0, NULL);
 		// , vp && vp->FileHeader.Flags2 & FSRTL_FLAG2_IS_PAGING_FILE
 		// ? HighPagePriority : NormalPagePriority);
 
@@ -6864,7 +6921,10 @@ query_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	if (FileObject == NULL || FileObject->FsContext == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
-	void *buf = MapUserBuffer(Irp);
+	PMDL mdl = NULL;
+	void *buf = MapUserBuffer(Irp,
+	    IrpSp->Parameters.QuerySecurity.Length,
+	    IoWriteAccess, &mdl);
 
 	struct vnode *vp = FileObject->FsContext;
 	VN_HOLD(vp);
@@ -6889,6 +6949,7 @@ query_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		Irp->IoStatus.Information = 0;
 	}
 
+	UnMapUserBuffer(mdl);
 	return (Status);
 }
 

@@ -207,6 +207,7 @@ zfs_uio_iovec_init(zfs_uio_t *uio, const struct iovec *iov,
 	uio->uio_segflg = seg;
 	uio->uio_fmode = 0;
 	uio->uio_extflg = 0;
+	uio->uio_index = 0;
 	uio->uio_resid = resid;
 	uio->uio_skip = skip;
 }

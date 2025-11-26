@@ -209,7 +209,9 @@ extern void zfs_load_ntsecurity(struct vnode *vp);
 extern void zfs_remove_ntsecurity(struct vnode *vp);
 
 extern struct vnode *zfs_parent(struct vnode *);
-extern PVOID MapUserBuffer(IN OUT PIRP Irp);
+extern void *MapUserBuffer(PIRP, ULONG, LOCK_OPERATION, PMDL *);
+extern void UnMapUserBuffer(PMDL);
+
 extern void mount_add_device(PDRIVER_OBJECT DriverObject,
     PDEVICE_OBJECT PhysicalDeviceObject);
 extern void zfs_windows_unmount_free(PUNICODE_STRING symlink_name);

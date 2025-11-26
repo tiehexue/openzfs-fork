@@ -7064,21 +7064,24 @@ volume_read(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	void *buffer;
 	bufferLength = IrpSp->Parameters.Read.Length;
 	LARGE_INTEGER offset = IrpSp->Parameters.Read.ByteOffset;
-
-	buffer = Irp->AssociatedIrp.SystemBuffer;
-	if (buffer == NULL)
-		buffer = MapUserBuffer(Irp);
-	if (buffer == NULL) {
-		Irp->IoStatus.Information = 0;
-		return (STATUS_INSUFFICIENT_RESOURCES);
-	}
+	PMDL mdl = NULL;
 
 	if (offset.QuadPart < 0 || bufferLength == 0) {
 		Irp->IoStatus.Information = 0;
 		return (STATUS_INVALID_PARAMETER);
 	}
 
+	buffer = MapUserBuffer(Irp, IrpSp->Parameters.Read.Length,
+	    IoWriteAccess, &mdl);
+	if (buffer == NULL) {
+		Irp->IoStatus.Information = 0;
+		return (STATUS_INSUFFICIENT_RESOURCES);
+	}
+
+
 	memset(buffer, 0, bufferLength);
+
+	UnMapUserBuffer(mdl);
 
 	Irp->IoStatus.Information = bufferLength;
 	dprintf("%s exit (%lld bytes)\n", __func__, bufferLength);
