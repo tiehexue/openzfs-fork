@@ -147,6 +147,20 @@ encroot_needs_prompt(zfs_handle_t *rhp)
 	    keylocation_is_prompt(kloc))
 		return (1);
 
+	// Check if we should load keys that are not prompt. (file:// etc)
+	if (ks == ZFS_KEYSTATUS_UNAVAILABLE &&
+	    !keylocation_is_prompt(kloc)) {
+		int rc;
+		rc = zfs_crypto_load_key(rhp, B_FALSE, NULL);
+
+		if (rc != 0) {
+			const char *desc = libzfs_error_description(
+			    zfs_get_handle(rhp));
+			dprintf("failure %s\n", desc ? desc : "");
+		}
+
+	}
+
 	return (0);
 }
 

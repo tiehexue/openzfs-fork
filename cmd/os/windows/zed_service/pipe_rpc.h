@@ -87,6 +87,7 @@ enum {
     ZIMP_FORCE = 0x01, // zpool import -f
     ZIMP_READONLY = 0x02, // readonly=on
     ZIMP_NOMOUNT = 0x04, // -N
+    ZIMP_LOADKEYS = 0x08, // -l
 };
 
 #pragma pack(push, 1)

@@ -441,40 +441,44 @@ unlock_cb(const char *ds_utf8, void *arg)
 }
 
 void
-mount_one_pool(HWND owner, const char *pool_name_utf8)
+mount_one_pool(HWND owner, const char *pool_name_utf8, int flags)
 {
 
-	dprintf("mount_one_pool: %s\n", pool_name_utf8);
+	dprintf("mount_one_pool: %s (flags 0x%x)\n", pool_name_utf8, flags);
 
-	// 1) PREFLIGHT
-	char *pf = NULL; uint32_t pfl = 0;
-	if (!preflight_pool(pool_name_utf8, &pf, &pfl)) {
-		MessageBoxW(owner,
-		    L"Preflight failed.",
-		    L"OpenZFS",
-		    MB_OK | MB_ICONERROR);
-		return;
-	}
+	// If we are to load crypto datasets...
+	if (flags & ZIMP_LOADKEYS) {
 
-	// Count locked roots (you already have for_each_locked)
-	int locked_count = for_each_locked(pf, (int)pfl, NULL, NULL);
-	dprintf("mount_one_pool: preflight shows %d locked datasets\n",
-	    locked_count);
-	// 2) Unlock if needed
-	if (locked_count > 0) {
-		struct unlock_ctx ctx = {
-		    .owner = owner,
-		    .rpc = &g_rpc,
-		    .any_failed = 0
-		};
-		(void) for_each_locked(pf, (int)pfl, unlock_cb, &ctx);
+		// 1) PREFLIGHT
+		char *pf = NULL; uint32_t pfl = 0;
+		if (!preflight_pool(pool_name_utf8, &pf, &pfl)) {
+			MessageBoxW(owner,
+			    L"Preflight failed.",
+			    L"OpenZFS",
+			    MB_OK | MB_ICONERROR);
+			return;
+		}
+
+		// Count locked roots (you already have for_each_locked)
+		int locked_count = for_each_locked(pf, (int)pfl, NULL, NULL);
+		dprintf("mount_one_pool: preflight shows %d locked datasets\n",
+		    locked_count);
+		// 2) Unlock if needed
+		if (locked_count > 0) {
+			struct unlock_ctx ctx = {
+			    .owner = owner,
+			    .rpc = &g_rpc,
+			    .any_failed = 0
+			};
+			(void) for_each_locked(pf, (int)pfl, unlock_cb, &ctx);
+
+			HeapFree(GetProcessHeap(), 0, pf);
+			pf = NULL;
+			pfl = 0;
+		}
 
 		HeapFree(GetProcessHeap(), 0, pf);
-		pf = NULL;
-		pfl = 0;
-	}
-
-	HeapFree(GetProcessHeap(), 0, pf);
+	} // flags |= ZIMP_LOADKEYS
 
 	// 3) Mount if clear
 	op_mount_req_t mreq = { 0 };
@@ -582,7 +586,8 @@ mount_all_pools(HWND hWnd, uint8_t **out_mount, uint32_t *outlen_mount)
 					    sizeof (name));
 
 					// call OP_MOUNT_POOL for this pool
-					mount_one_pool(hWnd, name);
+					mount_one_pool(hWnd, name,
+					    ZIMP_LOADKEYS);
 
 				}
 			}

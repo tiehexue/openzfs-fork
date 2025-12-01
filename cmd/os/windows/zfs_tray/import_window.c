@@ -46,7 +46,7 @@
 
 #pragma comment(lib, "comctl32.lib")
 
-extern void mount_one_pool(HWND owner, const char *pool_name_utf8);
+extern void mount_one_pool(HWND owner, const char *pool_name_utf8, int flags);
 
 #ifndef ARRAYSIZE
 #define	ARRAYSIZE(a) (sizeof (a)/sizeof ((a)[0]))
@@ -357,6 +357,8 @@ ImportDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 		};
 		InitCommonControlsEx(&icc);
 
+		CheckDlgButton(hDlg, IDC_CHK_LOADKEYS, BST_CHECKED);
+
 		// init listview columns, set status text, kick scan thread
 		AddListColumns(GetDlgItem(hDlg, IDC_LIST));
 		SetDlgItemTextW(hDlg, IDC_STATUS,
@@ -393,6 +395,9 @@ ImportDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 			if (IsDlgButtonChecked(hDlg, IDC_CHK_NOMOUNT) ==
 			    BST_CHECKED)
 				flags |= ZIMP_NOMOUNT;
+			if (IsDlgButtonChecked(hDlg, IDC_CHK_LOADKEYS) ==
+			    BST_CHECKED)
+				flags |= ZIMP_LOADKEYS;
 
 			wchar_t altrootW[MAX_PATH] = L"";
 			GetDlgItemTextW(hDlg, IDC_ED_ALTROOT, altrootW,
@@ -424,7 +429,7 @@ ImportDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 				if (parse_import_pool((const char *)out,
 				    (int)outlen, poolA, sizeof (poolA),
 				    &guid2)) {
-					mount_one_pool(hDlg, poolA);
+					mount_one_pool(hDlg, poolA, flags);
 				}
 				HeapFree(GetProcessHeap(), 0, out);
 				PostMessageW(hDlg, WM_APP_IMPORT_DONE, TRUE, 0);
