@@ -1669,7 +1669,7 @@ dsl_scan_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *  or
 	 *  - the scan queue has reached its memory use limit
 	 */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t scan_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -1731,7 +1731,7 @@ dsl_error_scrub_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *  - the spa is shutting down because this pool is being exported
 	 *    or the machine is rebooting.
 	 */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t error_scrub_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -3278,7 +3278,7 @@ static boolean_t
 scan_io_queue_check_suspend(dsl_scan_t *scn)
 {
 	/* See comment in dsl_scan_check_suspend() */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t scan_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -3635,7 +3635,7 @@ dsl_scan_async_block_should_pause(dsl_scan_t *scn)
 		return (B_TRUE);
 	}
 
-	elapsed_nanosecs = gethrtime() - scn->scn_sync_start_time;
+	elapsed_nanosecs = getlrtime() - scn->scn_sync_start_time;
 	return (elapsed_nanosecs / (NANOSEC / 2) > zfs_txg_timeout ||
 	    (NSEC2MSEC(elapsed_nanosecs) > scn->scn_async_block_min_time_ms &&
 	    txg_sync_waiting(scn->scn_dp)) ||
@@ -3922,7 +3922,7 @@ dsl_process_async_destroys(dsl_pool_t *dp, dmu_tx_t *tx)
 		    "free_bpobj/bptree on %s in txg %llu; err=%u",
 		    (longlong_t)scn->scn_visited_this_txg,
 		    (longlong_t)
-		    NSEC2MSEC(gethrtime() - scn->scn_sync_start_time),
+		    NSEC2MSEC(getlrtime() - scn->scn_sync_start_time),
 		    spa->spa_name, (longlong_t)tx->tx_txg, err);
 		scn->scn_visited_this_txg = 0;
 		scn->scn_async_frees_this_txg = 0;
@@ -4253,14 +4253,14 @@ dsl_errorscrub_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	}
 
 	spa->spa_scrub_active = B_TRUE;
-	scn->scn_sync_start_time = gethrtime();
+	scn->scn_sync_start_time = getlrtime();
 
 	/*
 	 * zfs_scan_suspend_progress can be set to disable scrub progress.
 	 * See more detailed comment in dsl_scan_sync().
 	 */
 	if (zfs_scan_suspend_progress) {
-		uint64_t scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+		uint64_t scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		int mintime = zfs_scrub_min_time_ms;
 
 		while (zfs_scan_suspend_progress &&
@@ -4268,7 +4268,7 @@ dsl_errorscrub_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    !spa_shutting_down(scn->scn_dp->dp_spa) &&
 		    NSEC2MSEC(scan_time_ns) < mintime) {
 			delay(hz);
-			scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+			scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		}
 		return;
 	}
@@ -4478,7 +4478,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	scn->scn_avg_zio_size_this_txg = 0;
 	scn->scn_zios_this_txg = 0;
 	scn->scn_suspending = B_FALSE;
-	scn->scn_sync_start_time = gethrtime();
+	scn->scn_sync_start_time = getlrtime();
 	spa->spa_scrub_active = B_TRUE;
 
 	/*
@@ -4502,7 +4502,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	 * useful for testing and debugging.
 	 */
 	if (zfs_scan_suspend_progress) {
-		uint64_t scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+		uint64_t scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		uint_t mintime = (scn->scn_phys.scn_func ==
 		    POOL_SCAN_RESILVER) ? zfs_resilver_min_time_ms :
 		    zfs_scrub_min_time_ms;
@@ -4512,7 +4512,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    !spa_shutting_down(scn->scn_dp->dp_spa) &&
 		    NSEC2MSEC(scan_time_ns) < mintime) {
 			delay(hz);
-			scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+			scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		}
 		return;
 	}
@@ -4642,7 +4642,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    "%llu in ddt, %llu > maxtxg)",
 		    (longlong_t)scn->scn_visited_this_txg,
 		    spa->spa_name,
-		    (longlong_t)NSEC2MSEC(gethrtime() -
+		    (longlong_t)NSEC2MSEC(getlrtime() -
 		    scn->scn_sync_start_time),
 		    (longlong_t)scn->scn_objsets_visited_this_txg,
 		    (longlong_t)scn->scn_holes_this_txg,
@@ -4683,7 +4683,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    (longlong_t)scn->scn_zios_this_txg,
 		    spa->spa_name,
 		    (longlong_t)scn->scn_segs_this_txg,
-		    (longlong_t)NSEC2MSEC(gethrtime() -
+		    (longlong_t)NSEC2MSEC(getlrtime() -
 		    scn->scn_sync_start_time),
 		    (longlong_t)scn->scn_avg_zio_size_this_txg,
 		    (longlong_t)scn->scn_avg_seg_size_this_txg);
