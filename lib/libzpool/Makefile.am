@@ -210,6 +210,11 @@ libzpool_la_LDFLAGS += -Wl,-z,defs
 endif
 endif
 
+if BUILD_MACOS
+libzpool_la_CPPFLAGS += -DCLOSE_ON_UNMOUNT
+nodist_libzpool_la_SOURCES += module/os/macos/zfs/vdev_file_os.c
+endif
+
 if BUILD_FREEBSD
 libzpool_la_LIBADD += -lgeom
 endif
