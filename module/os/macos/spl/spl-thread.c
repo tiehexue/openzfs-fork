@@ -123,10 +123,11 @@ spl_thread_setup(void *v, wait_result_t wr)
 	lck_mtx_unlock(a->lck);
 
 	/* jump to proc, which doesn't come back here */
+	if (arg != NULL)
+		proc(arg);
 
-	proc(arg);
 	__builtin_unreachable();
-	panic("SPL: proc called from spl_thread_setup() returned");
+	ASSERT0("SPL: proc called from spl_thread_setup() returned");
 }
 
 kthread_t *
