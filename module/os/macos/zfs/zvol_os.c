@@ -340,7 +340,7 @@ zvol_os_write_zv_impl(zvol_state_t *zv, void *param)
 		dmu_tx_hold_write_by_dnode(tx, zv->zv_dn, off, bytes);
 
 		/* This will only fail for ENOSPC */
-		error = dmu_tx_assign(tx, TXG_WAIT);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
 		if (error) {
 			dmu_tx_abort(tx);
 			break;
@@ -502,7 +502,7 @@ zvol_os_unmap(zvol_state_t *zv, uint64_t off, uint64_t bytes)
 
 	dmu_tx_mark_netfree(tx);
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 
 	if (error) {
 		dmu_tx_abort(tx);

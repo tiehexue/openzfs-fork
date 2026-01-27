@@ -2269,7 +2269,7 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 
 		tx = dmu_tx_create(zfsvfs->z_os);
 		dmu_tx_hold_zap(tx, MASTER_NODE_OBJ, TRUE, NULL);
-		error = dmu_tx_assign(tx, TXG_WAIT);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
 		if (error) {
 			dmu_tx_abort(tx);
 		} else {
@@ -2923,7 +2923,7 @@ zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers)
 		    ZFS_SA_ATTRS);
 		dmu_tx_hold_zap(tx, DMU_NEW_OBJECT, FALSE, NULL);
 	}
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		return (error);
