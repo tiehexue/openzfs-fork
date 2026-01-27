@@ -130,7 +130,7 @@ vdev_disk_off_notify(ldi_handle_t lh, ldi_ev_cookie_t ecookie, void *arg,
 	 * Now that the device is closed, request that the spa_async_thread
 	 * mark the device as REMOVED and notify FMA of the removal.
 	 */
-	zfs_post_remove(vd->vdev_spa, vd);
+	zfs_post_remove(vd->vdev_spa, vd, B_TRUE);
 	vd->vdev_remove_wanted = B_TRUE;
 	spa_async_request(vd->vdev_spa, SPA_ASYNC_REMOVE);
 
@@ -761,7 +761,7 @@ vdev_disk_io_done(zio_t *zio)
 			 * DE is using this information to discard previous I/O
 			 * errors.
 			 */
-			zfs_post_remove(zio->io_spa, vd);
+			zfs_post_remove(zio->io_spa, vd, B_TRUE);
 			vd->vdev_remove_wanted = B_TRUE;
 			spa_async_request(zio->io_spa, SPA_ASYNC_REMOVE);
 		} else if (!vd->vdev_delayed_close) {
