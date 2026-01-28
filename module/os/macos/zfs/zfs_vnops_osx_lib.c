@@ -1554,7 +1554,7 @@ getfinderinfo(znode_t *zp, cred_t *cr, finderinfo_t *fip)
 
 	ZFS_UIO_INIT_XNU(uio, auio);
 	error = dmu_read_uio(zp->z_zfsvfs->z_os, xzp->z_id, uio,
-	    sizeof (finderinfo_t));
+	    sizeof (finderinfo_t), DMU_READ_PREFETCH);
 out:
 	if (name)
 		spa_strfree(name);

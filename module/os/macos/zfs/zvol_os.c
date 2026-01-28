@@ -354,7 +354,8 @@ zvol_os_write_zv_impl(zvol_state_t *zv, void *param)
 			dmu_tx_abort(tx);
 			break;
 		}
-		error = dmu_write_uio_dnode(zv->zv_dn, uio, bytes, tx);
+		error = dmu_write_uio_dnode(zv->zv_dn, uio, bytes, tx,
+		    DMU_READ_PREFETCH);
 		if (error == 0) {
 			zvol_log_write(zv, tx, off, bytes, sync);
 		}
@@ -416,7 +417,8 @@ zvol_os_read_zv_impl(zvol_state_t *zv, void *param)
 		if (bytes > volsize - zfs_uio_offset(uio))
 			bytes = volsize - zfs_uio_offset(uio);
 
-		error = dmu_read_uio_dnode(zv->zv_dn, uio, bytes);
+		error = dmu_read_uio_dnode(zv->zv_dn, uio, bytes,
+		    DMU_READ_PREFETCH);
 		if (error) {
 			/* convert checksum errors into IO errors */
 			if (error == ECKSUM)

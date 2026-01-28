@@ -362,7 +362,8 @@ mappedread(struct znode *zp, int nbytes, zfs_uio_t *uio)
 			error = zfs_uiomove((caddr_t)vaddr + off, bytes,
 			    UIO_READ, uio);
 		} else {
-			error = dmu_read_uio(os, zp->z_id, uio, bytes);
+			error = dmu_read_uio(os, zp->z_id, uio, bytes,
+			    DMU_READ_PREFETCH);
 		}
 
 		vaddr += PAGE_SIZE;
