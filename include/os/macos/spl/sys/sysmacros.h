@@ -114,6 +114,19 @@ extern unsigned int num_ecores;
 #define	minclsyspri  70 /* well below the render server and other graphics */
 #define	defclsyspri  75 /* five below the xnu kernel services */
 #define	maxclsyspri  80 /* 1 less than base, 2 less than networking */
+
+#if defined(_KERNEL)
+#define	wtqclsyspri  76
+#else
+	/*
+	 * we want to be below maclsyspri for zio
+	 * taskqs on macOS, to avoid starving out
+	 * base=81 (maxclsyspri) kernel tasks when
+	 * doing computation-intensive checksums etc.
+	 */
+#define	wtqclsyspri  75
+#endif
+
 /*
  * taskqs for scrubs can be lower-priority, and are better that way for wide
  * pools (where the number of vdevs is 50% or more the number of cores).
