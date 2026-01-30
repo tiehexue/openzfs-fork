@@ -86,5 +86,16 @@ extern void hrt2ts(hrtime_t hrt, struct timespec *tsp);
 #define	NSEC2SEC(n)	((n) / (NANOSEC / SEC))
 #define	SEC2NSEC(m)	((hrtime_t)(m) * (NANOSEC / SEC))
 
+static __inline hrtime_t
+getlrtime(void)
+{
+	struct timespec ts;
+	hrtime_t nsec;
+
+	getnanouptime(&ts);
+	nsec = ((hrtime_t)ts.tv_sec * NANOSEC) + ts.tv_nsec;
+	return (nsec);
+}
+
 
 #endif  /* _SPL_TIME_H */
