@@ -558,7 +558,7 @@ zvol_os_clear_private_cb(zvol_state_t *zv, void *param)
 }
 
 void
-zvol_os_clear_private(zvol_state_t *zv)
+zvol_os_remove_minor(zvol_state_t *zv)
 {
 	void *term;
 
