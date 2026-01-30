@@ -2661,7 +2661,8 @@ top:
 
 		dprintf("pageout: dmu_write off 0x%llx size 0x%lx\n", off, sz);
 
-		dmu_write(zfsvfs->z_os, zp->z_id, off, sz, va, tx);
+		dmu_write(zfsvfs->z_os, zp->z_id, off, sz, va, tx,
+		    DMU_READ_NO_PREFETCH);
 		va += sz;
 		off += sz;
 		len -= sz;
@@ -2675,7 +2676,8 @@ top:
 		ssize_t sz = len;
 
 		dprintf("pageout: dmu_writeX off 0x%llx size 0x%lx\n", off, sz);
-		dmu_write(zfsvfs->z_os, zp->z_id, off, sz, va, tx);
+		dmu_write(zfsvfs->z_os, zp->z_id, off, sz, va, tx,
+		    DMU_READ_NO_PREFETCH);
 
 		va += sz;
 		off += sz;
@@ -2853,7 +2855,8 @@ static int bluster_pageout(zfsvfs_t *zfsvfs, znode_t *zp, upl_t upl,
 #endif
 
 	dmu_write(zfsvfs->z_os, zp->z_id, f_offset, size,
-	    &vaddr[upl_offset], tx);
+	    &vaddr[upl_offset], tx,
+	    DMU_READ_NO_PREFETCH);
 
 	return (0);
 }
