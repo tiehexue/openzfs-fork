@@ -242,6 +242,7 @@ zfs_common_SRCS = \
 	%D%/../../zfs/zfeature.c \
 	%D%/../../zcommon/zfeature_common.c \
 	%D%/../../zfs/zfs_byteswap.c \
+	%D%/../../zfs/zfs_crrd.c \
 	%D%/../../zfs/zfs_fm.c \
 	%D%/../../zfs/zfs_fuid.c \
 	%D%/../../zfs/zfs_impl.c \
