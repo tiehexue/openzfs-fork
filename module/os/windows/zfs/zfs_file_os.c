@@ -87,8 +87,50 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 #ifdef O_EXLOCK
 	// if (flags&O_EXLOCK) share &= ~FILE_SHARE_WRITE;
 #endif
+	uint64_t vdev_win_offset = 0ULL; /* soft partition start */
+	uint64_t vdev_win_length = 0ULL; /* soft partition length */
+	char *vdev_path = NULL, *FileName = NULL;
+	vdev_path = spa_strdup(path);
 
-	RtlInitUnicodeString(&uniName, buf);
+	if (vdev_path[0] == '#') {
+		uint8_t *end;
+		end = &vdev_path[0];
+		while (end && end[0] == '#') end++;
+		ddi_strtoull(end, &end, 10, &vdev_win_offset);
+		while (end && end[0] == '#') end++;
+		ddi_strtoull(end, &end, 10, &vdev_win_length);
+		while (end && end[0] == '#') end++;
+
+		FileName = end;
+	} else {
+		FileName = vdev_path;
+
+		// Sometimes only vdev_path is set, with "/dev/physicaldrive"
+		// make it be " \??\physicaldrive" space skipped over.
+		if (strncmp("/dev/", FileName, 5) == 0) {
+			FileName[0] = ' ';
+			FileName[1] = '\\';
+			FileName[2] = '?';
+			FileName[3] = '?';
+			FileName[4] = '\\';
+			FileName++;
+		}
+	}
+
+#ifdef _KERNEL
+	if (strncmp("\\\\?\\", FileName, 4) == 0) {
+		FileName[1] = '?';
+	}
+	if (strncmp("//./", FileName, 4) == 0) {
+		FileName[1] = '?';
+		FileName[2] = '?';
+		for (int i = 0; FileName[i] != 0; i++)
+			if (FileName[i] == '/')
+				FileName[i] = '\\';
+	}
+#endif
+
+	RtlInitUnicodeString(&uniName, FileName);
 	InitializeObjectAttributes(&objAttr, &uniName,
 	    OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
 	    NULL, NULL);
@@ -104,6 +146,8 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	    dwCreationDisposition,
 	    FILE_SYNCHRONOUS_IO_NONALERT,
 	    NULL, 0);
+
+	spa_strfree(vdev_path);
 
 	if (ntstatus != STATUS_SUCCESS)
 		return (-1);
@@ -140,8 +184,27 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	fp->f_handle = handle;
 	fp->f_fileobject = FileObject;
 	fp->f_deviceobject = DeviceObject;
+	fp->f_win_offset = vdev_win_offset;
+	fp->f_win_length = vdev_win_length;
 
 	*fpp = fp;
+
+#ifdef _WIN32
+	int error;
+	// Change it to SPARSE, so TRIM might work
+	error = ZwFsControlFile(
+	    fp->f_handle,
+	    NULL,
+	    NULL,
+	    NULL,
+	    NULL,
+	    FSCTL_SET_SPARSE,
+	    NULL,
+	    0,
+	    NULL,
+	    0);
+	dprintf("%s: set Sparse 0x%x.\n", __func__, error);
+#endif
 
 	return (0);
 }
@@ -248,7 +311,7 @@ zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t count, loff_t off,
 	NTSTATUS ntstatus;
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset = { 0 };
-	offset.QuadPart = off;
+	offset.QuadPart = off + fp->f_win_offset;
 	ntstatus = ZwWriteFile(fp->f_handle, NULL, NULL, NULL,
 	    &ioStatusBlock, buf, count, &offset, NULL);
 	// reset fp to its original position
@@ -277,7 +340,7 @@ zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
 	NTSTATUS ntstatus;
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset = { 0 };
-	offset.QuadPart = off;
+	offset.QuadPart = off + fp->f_win_offset;
 	ntstatus = ZwReadFile(fp->f_handle, NULL, NULL, NULL,
 	    &ioStatusBlock, buf, count, &offset, NULL);
 	if (STATUS_SUCCESS != ntstatus)
@@ -326,7 +389,7 @@ zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
 
 	memset(&flck, 0, sizeof (flck));
 	flck.l_type = F_FREESP;
-	flck.l_start = offset;
+	flck.l_start = offset + fp->f_win_offset;
 	flck.l_len = len;
 	flck.l_whence = 0;
 
@@ -352,6 +415,16 @@ zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
 	FILE_STANDARD_INFORMATION fileInfo = { 0 };
 	IO_STATUS_BLOCK ioStatusBlock;
 	NTSTATUS ntStatus;
+
+	// Linux code checks for S_ISREG in vdev_file.c
+	zfattr->zfa_mode = S_IFREG;
+
+	if (fp->f_win_length != 0ULL) {
+		// Soft partition, return its length
+		zfattr->zfa_size = fp->f_win_length;
+		return (0);
+	}
+
 	ntStatus = ZwQueryInformationFile(
 	    fp->f_handle,
 	    &ioStatusBlock,

@@ -41,6 +41,8 @@ struct spl_fileproc {
 	HANDLE		f_handle;
 	void		*f_fileobject;
 	void		*f_deviceobject;
+	uint64_t	f_win_offset; /* soft partition start */
+	uint64_t	f_win_length; /* soft partition length */
 };
 
 #define	file_t struct spl_fileproc
