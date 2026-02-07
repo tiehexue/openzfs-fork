@@ -730,6 +730,24 @@ param_set_deadman_failmode(ZFS_MODULE_PARAM_ARGS)
 }
 
 
+int
+param_set_raidz_impl(ZFS_MODULE_PARAM_ARGS)
+{
+	static char buf[LINUX_MAX_MODULE_PARAM_LEN];
+	int rc;
+
+	*type = ZT_TYPE_STRING;
+
+	if (set == B_FALSE) {
+		vdev_raidz_impl_get(buf, LINUX_MAX_MODULE_PARAM_LEN);
+		*ptr = (void *)buf;
+		*len = strlen(buf);
+		return (0);
+	}
+
+	rc = vdev_raidz_impl_set(buf);
+	return (rc);
+}
 /* spacemap.c */
 
 /* vdev.c */

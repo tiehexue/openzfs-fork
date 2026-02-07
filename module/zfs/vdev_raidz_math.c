@@ -670,7 +670,7 @@ win32_zfs_vdev_raidz_impl_set(ZFS_MODULE_PARAM_ARGS)
 
 	if (set == B_FALSE) {
 		if (raidz_math_initialized)
-			zfs_vdev_raidz_impl_get(str, NULL);
+			vdev_raidz_impl_get(str, PAGE_SIZE);
 		*ptr = str;
 		*len = strlen(str);
 		return (0);
