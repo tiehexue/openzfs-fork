@@ -238,8 +238,6 @@ extern int zfs_suspend_fs(zfsvfs_t *zfsvfs);
 extern int zfs_resume_fs(zfsvfs_t *zfsvfs, struct dsl_dataset *ds);
 extern int zfs_userspace_one(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     const char *domain, uint64_t rid, uint64_t *valuep);
-extern int zfs_userspace_many(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
-    uint64_t *cookiep, void *vbuf, uint64_t *bufsizep);
 extern int zfs_set_userquota(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     const char *domain, uint64_t rid, uint64_t quota);
 extern boolean_t zfs_owner_overquota(zfsvfs_t *zfsvfs, struct znode *,
