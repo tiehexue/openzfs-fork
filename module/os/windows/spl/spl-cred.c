@@ -158,3 +158,17 @@ groupmember(gid_t gid, kauth_cred_t *cred)
 {
 	return (0);
 }
+
+void
+crhold(cred_t *cr)
+{
+	(void) cr;
+	/* current Windows port: cred_t is always NULL (see CRED()/kcred) */
+}
+
+void
+crfree(cred_t *cr)
+{
+	(void) cr;
+	/* current Windows port: cred_t is always NULL */
+}
