@@ -111,6 +111,12 @@ struct zfsvfs {
 	uint64_t	z_groupobjquota_obj;
 	uint64_t	z_projectquota_obj;
 	uint64_t	z_projectobjquota_obj;
+	uint64_t	z_defaultuserquota;
+	uint64_t	z_defaultgroupquota;
+	uint64_t	z_defaultprojectquota;
+	uint64_t	z_defaultuserobjquota;
+	uint64_t	z_defaultgroupobjquota;
+	uint64_t	z_defaultprojectobjquota;
 
 #ifdef _WIN32
 	dev_t	z_rdev;	/* proxy device for mount */
@@ -285,6 +291,8 @@ extern int zfs_get_temporary_prop(dsl_dataset_t *ds, zfs_prop_t zfs_prop,
     uint64_t *val, char *setpoint);
 
 extern int zfs_end_fs(zfsvfs_t *zfsvfs, struct dsl_dataset *ds);
+extern int zfs_set_default_quota(zfsvfs_t *zfsvfs, zfs_prop_t zfs_prop,
+    uint64_t quota);
 
 #ifdef	__cplusplus
 }
