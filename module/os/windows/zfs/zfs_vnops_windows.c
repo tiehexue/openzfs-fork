@@ -4169,7 +4169,7 @@ top:
 	if (fuid_dirtied)
 		zfs_fuid_txhold(zfsvfs, tx);
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		if (error == ERESTART)
@@ -4280,7 +4280,7 @@ top:
 	zfs_sa_upgrade_txholds(tx, zp);
 	zfs_sa_upgrade_txholds(tx, dzp);
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		if (error == ERESTART)

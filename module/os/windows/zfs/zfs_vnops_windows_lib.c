@@ -1599,7 +1599,7 @@ top:
 	}
 #endif
 	zfs_sa_upgrade_txholds(tx, dzp);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		zfs_dirent_unlock(dl);
 		if (error == ERESTART) {
