@@ -579,7 +579,8 @@ zvol_os_read_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 		    " %llu\n", __func__, __LINE__, "zvol_read_iokit: position",
 		    zfs_uio_offset(uio), zfs_uio_resid(uio), bytes);
 
-		error = dmu_read_uio_dnode(zv->zv_dn, uio, bytes);
+		error = dmu_read_uio_dnode(zv->zv_dn, uio, bytes,
+		    DMU_READ_PREFETCH);
 
 		if (error) {
 			/* convert checksum errors into IO errors */
@@ -681,7 +682,7 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 		}
 
 		error = dmu_write_uio_dnode(zv->zv_dn, uio,
-		    bytes, tx);
+		    bytes, tx, DMU_READ_PREFETCH);
 
 		if (error == 0) {
 			zvol_log_write(zv, tx, offset, bytes, sync);
