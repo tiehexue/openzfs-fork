@@ -78,27 +78,17 @@ spl_thread_create(
 	 * priority and 31 is the highest
 	 */
 
-	if (pri > minclsyspri) {
-		// thread_precedence_policy_data_t policy;
-		// policy.importance = pri - minclsyspri;
-
-		// thread_policy_set(thread,
-		//  THREAD_PRECEDENCE_POLICY,
-		//  (thread_policy_t)&policy,
-		//  THREAD_PRECEDENCE_POLICY_COUNT);
-
-		// TODO: Windows thread priority?
-
-		// why is this call missing?
-		// KeSetBasePriorityThread(thread, 1);
-	}
-
 	atomic_inc_64(&zfs_threads);
 
 	// Convert thread handle to pethread, so it matches current_thread()
 	PETHREAD eThread;
 	ObReferenceObjectByHandle(thread, THREAD_ALL_ACCESS, 0,
 	    KernelMode, (void **)&eThread, 0);
+
+	if (pri >= wtqclsyspri) {
+		KeSetPriorityThread(eThread, pri);
+	}
+
 	ObDereferenceObject(eThread);
 	ZwClose(thread);
 	return ((kthread_t *)eThread);
