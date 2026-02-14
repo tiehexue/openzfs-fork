@@ -44,25 +44,28 @@
 
 static uint32_t zvol_major = ZVOL_MAJOR;
 
-unsigned int zvol_request_sync = 0;
 unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
-unsigned int zvol_threads = 32;
 
-taskq_t *zvol_taskq;
+/*
+ * Is round-robin enough? We internally only spawn for
+ * IOKit deadlock avoidance, and low-stack situations,
+ * not performace in read/write.
+ */
+static volatile uint32_t zvol_os_rr;
 
 extern list_t zvol_state_list;
 
 _Atomic uint64_t spl_lowest_zvol_stack_remaining = 0;
 
-typedef struct zv_request {
+typedef struct zv_os_request {
 	zvol_state_t *zv;
 
 	void (*zv_func)(void *);
 	void *zv_arg;
 
 	taskq_ent_t	ent;
-} zv_request_t;
+} zv_os_request_t;
 
 #define	ZVOL_LOCK_HELD		(1<<0)
 #define	ZVOL_LOCK_SPA		(1<<1)
@@ -378,24 +381,25 @@ zvol_os_deregister_module(void)
 static void
 zvol_os_spawn_cb(void *param)
 {
-	zv_request_t *zvr = (zv_request_t *)param;
+	zv_os_request_t *zvr = (zv_os_request_t *)param;
 
 	zvr->zv_func(zvr->zv_arg);
 
-	kmem_free(zvr, sizeof (zv_request_t));
+	kmem_free(zvr, sizeof (zv_os_request_t));
 }
 
 static void
 zvol_os_spawn(void (*func)(void *), void *arg)
 {
-	zv_request_t *zvr;
-	zvr = kmem_alloc(sizeof (zv_request_t), KM_SLEEP);
+	zv_os_request_t *zvr;
+	int tqid = atomic_inc_32_nv(&zvol_os_rr) % zvol_taskqs.tqs_cnt;
+	zvr = kmem_alloc(sizeof (zv_os_request_t), KM_SLEEP);
 	zvr->zv_arg = arg;
 	zvr->zv_func = func;
 
 	taskq_init_ent(&zvr->ent);
 
-	taskq_dispatch_ent(zvol_taskq,
+	taskq_dispatch_ent(zvol_taskqs.tqs_taskq[tqid],
 	    zvol_os_spawn_cb, zvr, 0, &zvr->ent);
 }
 
@@ -1343,23 +1347,13 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 int
 zvol_init(void)
 {
-	int threads = MIN(MAX(zvol_threads, 1), 1024);
-
-	zvol_taskq = taskq_create(ZVOL_DRIVER, threads, maxclsyspri,
-	    threads * 2, INT_MAX, TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
-	if (zvol_taskq == NULL) {
-		return (-ENOMEM);
-	}
-
-	zvol_init_impl();
-	return (0);
+	return (zvol_init_impl());
 }
 
 void
 zvol_fini(void)
 {
 	zvol_fini_impl();
-	taskq_destroy(zvol_taskq);
 }
 
 /* ZFS ZVOLDI */
