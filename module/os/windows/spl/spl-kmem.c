@@ -49,7 +49,7 @@
 
 #include <Trace.h>
 
-#include <sys/mod_os.h>
+#include <sys/mod.h>
 
 // TODO, track down what is using floats in this file
 int _fltused = 0;

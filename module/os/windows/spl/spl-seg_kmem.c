@@ -89,7 +89,7 @@
 
 #ifdef _KERNEL
 #include <Trace.h>
-#include <sys/mod_os.h>
+#include <sys/mod.h>
 #endif /* _KERNEL */
 
 typedef int page_t;

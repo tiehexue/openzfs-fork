@@ -25,7 +25,7 @@
 
 #include <sys/zfs_context.h>
 #include <sys/linker_set.h>
-#include <sys/mod_os.h>
+#include <sys/mod.h>
 #include <sys/types.h>
 #include <sys/zap.h>
 #include <sys/spa.h>

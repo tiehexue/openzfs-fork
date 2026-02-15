@@ -91,7 +91,7 @@
 #define	_INC_TIME
 
 #include <sys/types.h>
-#include <sys/mod_os.h>
+#include <sys/mod.h>
 #include <ntddk.h>
 
 // #include <ntddstor.h>

@@ -33,7 +33,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <Trace.h>
-#include <sys/mod_os.h>
+#include <sys/mod.h>
 
 #define	max_line_length 1024
 

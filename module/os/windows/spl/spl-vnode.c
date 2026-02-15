@@ -237,7 +237,7 @@ kernel_ioctl(PDEVICE_OBJECT DeviceObject, FILE_OBJECT *FileObject,
 
 /* Linux TRIM API */
 
-#include </sys/mod_os.h>
+#include <sys/mod.h>
 
 uint64_t windows_trim_enabled = 0;
 ZFS_MODULE_PARAM(, windows_, trim_enabled, U64, ZMOD_RW,

@@ -36,7 +36,7 @@
 #include <sys/taskq.h>
 #include <sys/systeminfo.h>
 #include <sys/sunddi.h>
-#include <sys/mod_os.h>
+#include <sys/mod.h>
 #include <sys/random.h>
 #include <sys/processor.h>
 #include <zfs_gitrev.h>
