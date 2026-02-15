@@ -112,6 +112,10 @@
 	for ((pvar) = &__start_##set; \
 	    (pvar) < &__stop_##set; (pvar)++)
 
+#elif defined(_WIN32)
+
+#include <sys/linker_set.h>
+
 #else
 
 #define	SET_DECLARE(set, type) \
@@ -130,9 +134,11 @@
  * that, we force a symbol into that section, and then when iterating, skip
  * any NULL pointers.
  */
+#ifndef _WIN32
 static void *__zfs_tunable__placeholder
 	__attribute__((__section__(ZFS_TUNABLE_SECTION)))
 	__attribute__((__used__)) = NULL;
+#endif
 
 /*
  * Find the name tunable by walking through the linker set and comparing names,

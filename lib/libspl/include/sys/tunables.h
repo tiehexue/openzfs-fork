@@ -27,6 +27,10 @@
 #ifndef _SYS_TUNABLES_H
 #define	_SYS_TUNABLES_H
 
+#if defined(_WIN32)
+#include <sys/linker_set.h>
+#endif
+
 typedef enum {
 	ZFS_TUNABLE_TYPE_INT,
 	ZFS_TUNABLE_TYPE_UINT,
@@ -51,6 +55,8 @@ typedef struct zfs_tunable {
 
 #if defined(__APPLE__)
 #define	ZFS_TUNABLE_SECTION "__DATA_CONST,zfs_tunables"
+#elif defined(_WIN32)
+/* Not used */
 #else
 #define	ZFS_TUNABLE_SECTION "zfs_tunables"
 #endif

@@ -22,17 +22,20 @@
 #ifndef _LIBSPL_INTTYPES_H
 #define	_LIBSPL_INTTYPES_H
 
+#include_next <inttypes.h>
+
 #define	SCNi8  "hhi"
 #define	SCNi16 "hi"
 #define	SCNi32 "i"
 #define	SCNi64 "lli"
-#define	PRId32 "i"
+// #define	PRId32 "i"
 #define	PRIu64 "llu"
 #define	PRIx64 "llx"
 #define	PRIi64 "lli"
-#define	PRId64 "lli"
+// #define	PRId64 "lli"
+
 
 #define	strtoimax strtoull
-
+#define	strtoumax strtoull
 
 #endif /* SPL_INTTYPES_H */

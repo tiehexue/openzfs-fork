@@ -8,6 +8,7 @@ add_library(libspl
 	strlcat.c
 	strlcpy.c
     timestamp.c
+	tunables.c
 	assert.c
 	backtrace.c
     os/windows/posix.c
