@@ -788,7 +788,7 @@ zvol_os_unmap(zvol_state_t *zv, uint64_t off, uint64_t bytes)
 		 * (i.e. commit to zil).
 		 */
 		if (zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS) {
-			error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
+			zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		}
 	}
 
@@ -804,8 +804,8 @@ zvol_os_update_volsize(zvol_state_t *zv, uint64_t volsize)
 	return (0);
 }
 
-static void
-zvol_os_clear_private(zvol_state_t *zv)
+void
+zvol_os_remove_minor(zvol_state_t *zv)
 {
 #if 0
 	// Close the Storport half open
