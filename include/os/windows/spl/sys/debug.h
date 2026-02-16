@@ -69,6 +69,9 @@
 #define	__unused [[maybe_unused]]
 #define	always_inline __forceinline
 #define	_Noreturn __declspec(noreturn)
+#ifndef __must_check
+#define	__must_check _Check_return_
+#endif
 
 #else
 
@@ -88,6 +91,10 @@
 
 #define	__unused  __attribute__((unused))
 #define	_Noreturn	__attribute__((__noreturn__))
+
+#ifndef __must_check
+#define	__must_check __attribute__((__warn_unused_result__))
+#endif
 
 #endif
 

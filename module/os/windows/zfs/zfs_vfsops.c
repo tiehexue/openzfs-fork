@@ -165,7 +165,7 @@ zfs_vfs_sync(struct mount *vfsp, __unused int waitfor,
 		}
 
 		if (zfsvfs->z_log != NULL)
-			zil_commit(zfsvfs->z_log, 0);
+			error = zil_commit(zfsvfs->z_log, 0);
 
 		zfs_exit(zfsvfs, FTAG);
 
@@ -178,7 +178,7 @@ zfs_vfs_sync(struct mount *vfsp, __unused int waitfor,
 		spa_sync_allpools();
 	}
 
-	return (0);
+	return (error);
 }
 
 static void

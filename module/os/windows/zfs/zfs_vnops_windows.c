@@ -4194,8 +4194,8 @@ top:
 
 	dmu_tx_commit(tx);
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zfsvfs->z_log, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zfsvfs->z_log, 0);
 
 out:
 	VN_RELE(dvp);
@@ -4307,8 +4307,8 @@ top:
 
 	dmu_tx_commit(tx);
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zfsvfs->z_log, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zfsvfs->z_log, 0);
 
 out:
 	if (dzp != NULL)

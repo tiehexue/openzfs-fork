@@ -695,8 +695,8 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 
 	dataset_kstats_update_write_kstats(&zv->zv_kstat, offset);
 
-	if (sync)
-		zil_commit(zv->zv_zilog, ZVOL_OBJ);
+	if (error == 0 && sync)
+		error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 
 	rw_exit(&zv->zv_suspend_lock);
 
@@ -788,7 +788,7 @@ zvol_os_unmap(zvol_state_t *zv, uint64_t off, uint64_t bytes)
 		 * (i.e. commit to zil).
 		 */
 		if (zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS) {
-			zil_commit(zv->zv_zilog, ZVOL_OBJ);
+			error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		}
 	}
 

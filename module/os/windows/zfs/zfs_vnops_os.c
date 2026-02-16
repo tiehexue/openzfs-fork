@@ -720,8 +720,8 @@ out:
 		*zpp = zp;
 	}
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -955,8 +955,8 @@ out:
 	if (xzp)
 		zfs_zrele_async(xzp);
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -1153,13 +1153,14 @@ out:
 
 	zfs_dirent_unlock(dl);
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
-
 	if (error != 0) {
 		zrele(zp);
 	} else {
 	}
+
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
+
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
 }
@@ -1285,8 +1286,8 @@ out:
 
 	zrele(zp);
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -2473,8 +2474,8 @@ out:
 	}
 
 out2:
-	if (os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
+	if (err == 0 && os->os_sync == ZFS_SYNC_ALWAYS)
+		err = zil_commit(zilog, 0);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (err);
@@ -2956,8 +2957,8 @@ out:
 		zrele(tzp);
 	}
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -3129,7 +3130,7 @@ top:
 		*zpp = zp;
 
 		if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-			zil_commit(zilog, 0);
+			error = zil_commit(zilog, 0);
 	} else {
 		zrele(zp);
 	}
@@ -3371,8 +3372,8 @@ top:
 	if (tzp != NULL)
 		zrele(tzp);
 
-	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		zil_commit(zilog, 0);
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
