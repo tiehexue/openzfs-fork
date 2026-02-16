@@ -19,4 +19,9 @@
 #ifndef _OS_WINDOWS_SPL_MISC_H
 #define	_OS_WINDOWS_SPL_MISC_H
 
+/*
+ * Check if the current thread is a memory reclaim thread.
+ */
+extern int current_is_reclaim_thread(void);
+
 #endif

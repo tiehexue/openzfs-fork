@@ -130,3 +130,13 @@ timeout_generic(int type, void (*func)(void *), void *arg,
 	 */
 	return ((callout_id_t)arg);
 }
+
+/*
+ * Check if the current thread is a memory reclaim thread.
+ * Everything in XNU is secret.
+ */
+int
+current_is_reclaim_thread(void)
+{
+	return (0);
+}
