@@ -306,8 +306,9 @@ zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
  */
 int
 zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t count, loff_t off,
-    ssize_t *resid)
+    uint8_t ashift, ssize_t *resid)
 {
+	(void) ashift;
 	NTSTATUS ntstatus;
 	IO_STATUS_BLOCK ioStatusBlock;
 	LARGE_INTEGER offset = { 0 };
