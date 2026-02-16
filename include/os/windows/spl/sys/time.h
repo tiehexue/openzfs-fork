@@ -52,6 +52,14 @@ struct timespec;
 #define	NSEC2SEC(n) ((n) / (NANOSEC / SEC))
 #define	SEC2NSEC(m) ((hrtime_t)(m) * (NANOSEC / SEC))
 
+static inline hrtime_t
+getlrtime(void)
+{
+	LARGE_INTEGER freq;
+	LARGE_INTEGER c = KeQueryPerformanceCounter(&freq);
+	return (hrtime_t)((c.QuadPart * 1000000000LL) / freq.QuadPart);
+}
+
 /* Already defined in include/linux/time.h */
 #undef CLOCK_THREAD_CPUTIME_ID
 #undef CLOCK_REALTIME

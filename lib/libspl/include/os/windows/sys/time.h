@@ -75,6 +75,23 @@ typedef void *timer_t;
 #define	SEC2NSEC(m)	((hrtime_t)(m) * (NANOSEC / SEC))
 #define	NSEC2USEC(n)	((n) / (NANOSEC / MICROSEC))
 
+static inline hrtime_t
+getlrtime(void)
+{
+	static LARGE_INTEGER freq = { 0 };
+	LARGE_INTEGER c;
+
+	if (freq.QuadPart == 0)
+		QueryPerformanceFrequency(&freq);
+
+	QueryPerformanceCounter(&c);
+
+	// Convert to ns without overflowing too easily:
+	// ns = (c * 1e9) / freq
+	return (hrtime_t)((c.QuadPart * (LONGLONG)1000000000LL) /
+	    freq.QuadPart);
+}
+
 /* Technically timeval lives in winsock2.h */
 #if 0
 #ifndef _WINSOCK2API_
