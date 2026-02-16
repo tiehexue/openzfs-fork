@@ -154,6 +154,7 @@ add_library(libzpool
     "${MODULE_DIR}/zfs/zfeature.c"
     "${MODULE_DIR}/zfs/zfs_byteswap.c"
     "${MODULE_DIR}/zfs/zfs_chksum.c"
+    "${MODULE_DIR}/zfs/zfs_crrd.c"
     "${MODULE_DIR}/zfs/zfs_fm.c"
     "${MODULE_DIR}/zfs/zfs_fuid.c"
     "${MODULE_DIR}/zfs/zfs_ratelimit.c"

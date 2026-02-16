@@ -114,6 +114,7 @@ wdk_add_library(zfskern
   zfeature.c
   zfs_byteswap.c
   zfs_chksum.c
+  zfs_crrd.c
   zfs_fm.c
   zfs_fuid.c
   zfs_impl.c
