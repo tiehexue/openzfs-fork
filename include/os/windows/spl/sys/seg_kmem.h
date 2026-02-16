@@ -48,7 +48,7 @@ extern vmem_t *abd_subpage_arena;
  * segkmem page vnodes
  */
 #define	kvp		(kvps[KV_KVP])
-#define	zvp		(kvps[KV_ZVP])
+// #define	zvp		(kvps[KV_ZVP])
 #if defined(__sparc)
 #define	mpvp		(kvps[KV_MPVP])
 #define	promvp		(kvps[KV_PROMVP])
