@@ -5,6 +5,7 @@ add_library(libspl
     atomic.c
     list.c
     mkdirp.c
+    mutex.c
 	strlcat.c
 	strlcpy.c
     timestamp.c
