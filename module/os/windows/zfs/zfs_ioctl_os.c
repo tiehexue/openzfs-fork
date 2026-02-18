@@ -273,7 +273,7 @@ ZFSinPerfVdevEnumerate(PCW_MASK_INFORMATION EnumerateInstances)
 	unicodeName.Buffer = kmem_alloc(sizeof (WCHAR) *
 	    ZFS_MAX_DATASET_NAME_LEN, KM_SLEEP);
 	unicodeName.MaximumLength = ZFS_MAX_DATASET_NAME_LEN;
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	while ((spa_perf = spa_next(spa_perf)) != NULL) {
 		vdev_t *vd = spa_perf->spa_root_vdev;
 		char vdev_zpool[ZFS_MAX_DATASET_NAME_LEN] = { 0 };
@@ -308,7 +308,7 @@ ZFSinPerfVdevEnumerate(PCW_MASK_INFORMATION EnumerateInstances)
 			}
 		}
 	}
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 	UNICODE_STRING total;
 	RtlInitUnicodeString(&total, L"_Total");
 	status = AddZFSinPerfVdev(EnumerateInstances.Buffer,
@@ -333,7 +333,7 @@ void ZFSinPerfEnumerate(PCW_MASK_INFORMATION EnumerateInstances) {
 	spa_t *spa_perf = NULL;
 	ANSI_STRING ansi_spa;
 
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	while ((spa_perf = spa_next(spa_perf)) != NULL) {
 		spa_open_ref(spa_perf, FTAG);
 		RtlInitAnsiString(&ansi_spa, spa_perf->spa_name);
@@ -356,7 +356,7 @@ void ZFSinPerfEnumerate(PCW_MASK_INFORMATION EnumerateInstances) {
 			    __func__, __LINE__, status);
 		}
 	}
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 
 	UNICODE_STRING total;
 	RtlInitUnicodeString(&total, L"_Total");
@@ -594,7 +594,7 @@ void ZFSinPerfCollect(PCW_MASK_INFORMATION CollectData) {
 	spa_t *spa_perf = NULL;
 	zpool_perf_counters total_perf = { 0 };
 
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	while ((spa_perf = spa_next(spa_perf)) != NULL) {
 		zpool_perf_counters perf = { 0 };
 		spa_open_ref(spa_perf, FTAG);
@@ -633,7 +633,7 @@ void ZFSinPerfCollect(PCW_MASK_INFORMATION CollectData) {
 			__func__, __LINE__, status);
 		}
 	}
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 
 	UNICODE_STRING total;
 	RtlInitUnicodeString(&total, L"_Total");
@@ -659,7 +659,7 @@ void ZFSinPerfVdevCollect(PCW_MASK_INFORMATION CollectData) {
 
 	spa_t *spa_perf = NULL;
 	zpool_perf_counters total_perf_vdev = { 0 };
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	while ((spa_perf = spa_next(spa_perf)) != NULL) {
 		spa_config_enter(spa_perf, SCL_ALL, FTAG, RW_READER);
 		vdev_t *vd = spa_perf->spa_root_vdev;
@@ -699,7 +699,7 @@ void ZFSinPerfVdevCollect(PCW_MASK_INFORMATION CollectData) {
 		}
 		spa_config_exit(spa_perf, SCL_ALL, FTAG);
 	}
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 
 	UNICODE_STRING total;
 	RtlInitUnicodeString(&total, L"_Total");
