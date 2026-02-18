@@ -38,6 +38,7 @@
 #define	SIGHUP		1
 #define	SIGPIPE		13
 #define	SIGCHLD		18
+#define	SIGSTOP		23
 #define	SIGUSR1		30	/* user defined signal 1 */
 #define	SIGUSR2		31	/* user defined signal 2 */
 
