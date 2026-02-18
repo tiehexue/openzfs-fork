@@ -211,7 +211,7 @@ do_mount(zfs_handle_t *zhp, const char *dir, const char *optptr, int mflag)
 					if (toupper(driveletter[0]) >= 'A' &&
 					    toupper(driveletter[0]) <= 'Z')
 						break;
-					delay(hz >> 2);
+					Sleep(250);
 #ifdef DEBUG
 					fprintf(stderr,
 					    "waiting, looping\r\n");
