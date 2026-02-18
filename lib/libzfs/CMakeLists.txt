@@ -18,6 +18,7 @@ add_library(libzfs
 	os/windows/libzfs_mount_os.c
 	os/windows/libzfs_pool_os.c
 	os/windows/libzfs_util_os.c
+	os/windows/libzfs_weakpragma.c
  )
 
 #variable_watch(CRYPTO_STATIC)

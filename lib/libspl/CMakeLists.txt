@@ -24,7 +24,6 @@ add_library(libspl
     #os/windows/regex.c
     os/windows/signal.c
     #crc32.c
-    os/windows/weakpragma.c
     os/windows/uio.c
     os/windows/xdr.c
     os/windows/xdr_array.c

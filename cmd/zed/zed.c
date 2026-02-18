@@ -27,7 +27,9 @@
 #include "zed_event.h"
 #include "zed_file.h"
 #include "zed_log.h"
-
+#ifdef _WIN32
+#include <pthread.h>
+#endif
 static volatile sig_atomic_t _got_exit = 0;
 static volatile sig_atomic_t _got_hup = 0;
 

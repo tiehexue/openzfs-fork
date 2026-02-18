@@ -75,7 +75,6 @@
 #define	_REGEX_H_
 
 // #include <sys/cdefs.h>
-#include <sys/zfs_context.h>
 #include <sys/types.h>
 
 #define	_DIAGASSERT ASSERT

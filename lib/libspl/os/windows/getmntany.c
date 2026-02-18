@@ -45,12 +45,18 @@
 #include <io.h>
 #endif
 
-#include <sys/zfs_context.h>
 #include <sys/fs/zfs.h>
 
 #include <windows.h>
 #include <winternl.h>
 #include <ntstatus.h>
+
+typedef struct
+{
+    int len;
+    WCHAR buffer[1]; // make this dynamic?
+} fsctl_zfs_volume_mountpoint_t;
+
 
 #define	DIFF(xx) ((mrefp->xx != NULL) && \
 	    (mgetp->xx == NULL || strcmp(mrefp->xx, mgetp->xx) != 0))

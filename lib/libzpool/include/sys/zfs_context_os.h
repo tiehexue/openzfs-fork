@@ -30,7 +30,7 @@
 #define	ZFS_CONTEXT_OS_H_
 
 #ifdef _WIN32
-#include_next <sys/zfs_context_os.h>
+#include <sys/zfs_context_win32.h>
 #endif
 
 #define	HAVE_LARGE_STACKS	1

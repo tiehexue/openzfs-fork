@@ -34,13 +34,16 @@
 #include <sys/mntent.h>
 #include <sys/mount.h>
 #include <fcntl.h>
-#include <sys/zfs_ioctl.h>
+// #include <sys/zfs_ioctl.h>
 #include <pthread.h>
 #include <Windows.h>
 #include <langinfo.h>
-#include <os/windows/zfs/sys/zfs_ioctl_compat.h>
+// #include <os/windows/zfs/sys/zfs_ioctl_compat.h>
 #include <sys/mman.h>
 #include <sys/mnttab.h>
+#include <sys/utsname.h>
+#include <sys/uio.h>
+#include <termios.h>
 #include <wfunopen.h>
 
 /* Magic instruction to compiler to add library */
@@ -1128,17 +1131,38 @@ wosix_close(int fd)
 }
 
 int
-wosix_ioctl(int fd, unsigned long request, zfs_iocparm_t *wrap)
+wosix_ioctl_len(int fd, unsigned long request, void *wrap, size_t len)
 {
 	int error;
 	ULONG bytesReturned;
 
+	if (request == TIOCGWINSZ) {
+		struct winsize {
+			unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel;
+		};
+		CONSOLE_SCREEN_BUFFER_INFO csbi;
+		struct winsize *ws = (struct winsize *)wrap;
+
+		if (!GetConsoleScreenBufferInfo(ITOH(fd), &csbi)) {
+			errno = ENOTTY;
+			return (-1);
+		}
+
+		ws->ws_col = (unsigned short)
+		    (csbi.srWindow.Right - csbi.srWindow.Left + 1);
+		ws->ws_row = (unsigned short)
+		    (csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+		ws->ws_xpixel = 0;
+		ws->ws_ypixel = 0;
+		return (0);
+	}
+
 	error = DeviceIoControl(ITOH(fd),
 	    (DWORD)request,
 	    wrap,
-	    (DWORD)sizeof (zfs_iocparm_t),
+	    (DWORD)len,
 	    wrap,
-	    (DWORD)sizeof (zfs_iocparm_t),
+	    (DWORD)len,
 	    &bytesReturned,
 	    NULL);
 
@@ -1147,28 +1171,6 @@ wosix_ioctl(int fd, unsigned long request, zfs_iocparm_t *wrap)
 	else
 		error = 0;
 
-#ifdef DEBUG
-	fprintf(stderr,
-	    "    (ioctl 0x%x (%s) status %d bytes %ld)\n",
-	    (request & 0x2ffc) >> 2,
-	    getIoctlAsString((request & 0x2ffc) >> 2), error,
-	    bytesReturned);
-	fflush(stderr);
-#endif
-#if 0
-	for (int x = 0; x < 16; x++)
-		fprintf(stderr, "%02x ", ((unsigned char *)zc)[x]);
-	fprintf(stderr, "\n");
-	fflush(stderr);
-	fprintf(stderr,
-	    "returned ioctl on 0x%x (raw 0x%x) struct size %d in "
-	    "%p:%d out %p:%d\n",
-	    (request & 0x2ffc) >> 2, request,
-	    sizeof (zfs_cmd_t),
-	    zc->zc_nvlist_src, zc->zc_nvlist_src_size,
-	    zc->zc_nvlist_dst, zc->zc_nvlist_dst_size);
-	fflush(stderr);
-#endif
 	errno = error;
 	return (error);
 }

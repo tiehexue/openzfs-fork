@@ -69,7 +69,7 @@ extern int wosix_open(const char *path, int oflag, ...);
 extern int wosix_openat(int fd, const char *name, int flags, ...);
 extern int wosix_close(int fd);
 struct zfs_iocparm;
-extern int wosix_ioctl(int fd, unsigned long request, struct zfs_iocparm *zc);
+extern int wosix_ioctl_len(int fd, unsigned long request, void *zc, size_t len);
 extern int wosix_read(int fd, void *data, uint32_t len);
 extern int wosix_write(int fd, const void *data, uint32_t len);
 extern int wosix_isatty(int fd);
@@ -117,7 +117,7 @@ extern int wosix_access(const char *name, int mode);
 #undef  close
 #define	close	wosix_close
 #undef  ioctl
-#define	ioctl	wosix_ioctl
+#define	ioctl(FD, REQ, PTR)	wosix_ioctl_len(FD, REQ, PTR, sizeof (*(PTR)))
 #undef  lseek
 #define	lseek	wosix_lseek
 #undef  fsync

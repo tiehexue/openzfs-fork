@@ -29,6 +29,29 @@
 #include <os/windows/zfs/sys/zfs_ioctl_compat.h>
 #include <libzfs_core.h>
 
+int
+ioctl_impl(int fd, unsigned long request, zfs_iocparm_t *wrap)
+{
+	int error;
+	ULONG bytesReturned;
+
+	error = DeviceIoControl(ITOH(fd),
+	    (DWORD)request,
+	    wrap,
+	    (DWORD)sizeof (zfs_iocparm_t),
+	    wrap,
+	    (DWORD)sizeof (zfs_iocparm_t),
+	    &bytesReturned,
+	    NULL);
+
+	if (error == 0)
+		error = GetLastError();
+	else
+		error = 0;
+	errno = error;
+	return (error);
+}
+
 static int
 zcmd_ioctl_compat(int fd, int request, zfs_cmd_t *zc, const int cflag)
 {
@@ -85,7 +108,7 @@ zcmd_ioctl_compat(int fd, int request, zfs_cmd_t *zc, const int cflag)
 
 	/* Pass-through ioctl, rarely used if at all */
 
-	ret = ioctl(fd, ncmd, zc_c);
+	ret = ioctl_impl(fd, ncmd, zc_c);
 	ASSERT0(ret);
 
 	zfs_cmd_compat_get(zc, (caddr_t)zc_c, cflag);

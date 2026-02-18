@@ -102,15 +102,11 @@ zed_mount_pool_nvl(uint64_t pool_guid, const char *pool_name,
     const char *mntopts, uint32_t flags)
 {
 	(void) flags;
-	dprintf("%s\n", __func__);
 
 	zpool_handle_t *zhp = open_pool_by_guid_or_name(pool_guid, pool_name);
 	const char *pname = zhp ? zpool_get_name(zhp) : pool_name;
 	if (!zhp)
 		return (res_pool(pname, 0, "pool not imported"));
-
-	dprintf("mount pool %s opts=%s flags=0x%x\n",
-	    pname ? pname : "(null)", mntopts ? mntopts : "", (unsigned)flags);
 
 	int rc = zpool_enable_datasets(zhp,
 	    (char *)(uintptr_t)mntopts /* constness differs by tree */, 0, 0);
@@ -134,9 +130,6 @@ zed_unmount_pool_nvl(uint64_t pool_guid, const char *pool_name,
 	const char *pname = zhp ? zpool_get_name(zhp) : pool_name;
 	if (!zhp)
 		return (res_pool(pname, 0, "pool not imported"));
-
-	dprintf("unmount pool %s flags=0x%x\n",
-	    pname ? pname : "(null)", (unsigned)flags);
 
 	int rc = -1;
 
@@ -172,9 +165,6 @@ zed_mount_dataset_nvl(const char *dataset,
  */
 	(void) flags;
 
-	dprintf("mount dataset %s mntpoint=%s\n",
-	    dataset, mntpoint_opt ? mntpoint_opt : "(default)");
-
 	int rc = zfs_mount(zhp, mntpoint_opt, 0);
 
 	if (rc != 0) {
@@ -199,9 +189,6 @@ zed_unmount_dataset_nvl(const char *dataset,
 	zfs_handle_t *zhp = zfs_open(g_lzh, dataset, ZFS_TYPE_DATASET);
 	if (!zhp)
 		return (res_ds(dataset, 0, "dataset not found"));
-
-	dprintf("unmount dataset %s force=%d\n",
-	    dataset, (flags & ZUMNT_FORCE) ? 1 : 0);
 
 	int rc = zfs_unmount(zhp, NULL /* all mountpoints for this ds */,
 	    (flags & ZUMNT_FORCE) ? B_TRUE : B_FALSE);
