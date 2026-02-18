@@ -8,6 +8,7 @@ add_library(libspl
     mutex.c
 	strlcat.c
 	strlcpy.c
+	rwlock.c
     timestamp.c
 	tunables.c
 	assert.c
