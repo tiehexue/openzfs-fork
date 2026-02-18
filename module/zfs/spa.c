@@ -1643,11 +1643,15 @@ spa_taskq_free_param(ZFS_MODULE_PARAM_ARGS)
 	return (spa_taskq_param_set(ZIO_TYPE_FREE, buf));
 }
 #endif
+
 #ifdef _WIN32
+
+#define	SPA_TASKQ_PARAM_MAX	(1024)
+
 static int
 win32_spa_taskq_read_param_set(ZFS_MODULE_PARAM_ARGS)
 {
-	char str[1024] = "";
+	char str[SPA_TASKQ_PARAM_MAX] = "";
 
 	*type = ZT_TYPE_STRING;
 
@@ -1668,7 +1672,7 @@ win32_spa_taskq_read_param_set(ZFS_MODULE_PARAM_ARGS)
 static int
 win32_spa_taskq_write_param_set(ZFS_MODULE_PARAM_ARGS)
 {
-	char str[1024] = "";
+	char str[SPA_TASKQ_PARAM_MAX] = "";
 
 	*type = ZT_TYPE_STRING;
 
@@ -1682,6 +1686,27 @@ win32_spa_taskq_write_param_set(ZFS_MODULE_PARAM_ARGS)
 	ASSERT3P(ptr, !=, NULL);
 
 	spa_taskq_param_set(ZIO_TYPE_WRITE, *ptr);
+
+	return (0);
+}
+
+static int
+win32_spa_taskq_free_param_set(ZFS_MODULE_PARAM_ARGS)
+{
+	char str[SPA_TASKQ_PARAM_MAX] = "";
+
+	*type = ZT_TYPE_STRING;
+
+	if (set == B_FALSE) {
+		(void) spa_taskq_param_get(ZIO_TYPE_FREE, str, FALSE);
+		*ptr = str;
+		*len = strlen(str);
+		return (0);
+	}
+
+	ASSERT3P(ptr, !=, NULL);
+
+	spa_taskq_param_set(ZIO_TYPE_FREE, *ptr);
 
 	return (0);
 }
