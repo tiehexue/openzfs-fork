@@ -4,6 +4,7 @@ use_clang()
 add_library(libspl
     atomic.c
     condvar.c
+	cred.c
     list.c
     mkdirp.c
     mutex.c
