@@ -37,6 +37,9 @@
 #include <errno.h>
 #include <poll.h>
 
+#define	_SYS_KSTAT_H // Use the kernel version
+
+#include "kstat_kernel.h"
 #include <sys/kstat.h>
 
 #include "kstat.h"
