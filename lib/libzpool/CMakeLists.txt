@@ -173,7 +173,6 @@ add_library(libzpool
     "abd_os.c"
     "arc_os.c"
     "kernel.c"
-    "taskq.c"
     "util.c"
     "vdev_label_os.c"
     "zfs_debug.c"

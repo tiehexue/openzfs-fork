@@ -10,6 +10,8 @@ add_library(libspl
 	strlcat.c
 	strlcpy.c
 	rwlock.c
+	taskq.c
+    thread.c
     timestamp.c
 	tunables.c
 	assert.c
