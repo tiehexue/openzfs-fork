@@ -21,6 +21,5 @@ target_link_libraries(libzutil PUBLIC
 	libavl
 	libefi
 	libshare
-	libtpool
 	zlib
 )

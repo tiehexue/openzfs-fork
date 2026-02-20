@@ -50,7 +50,6 @@
 #include <libzfs.h>
 
 #include "libzfs_impl.h"
-#include <thread_pool.h>
 
 #include <sys/zfs_ioctl.h>
 
