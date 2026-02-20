@@ -67,4 +67,6 @@
 
 #define	NBBY				8
 
+#define	ptob(x)		((x) * PAGESIZE)
+
 #endif
