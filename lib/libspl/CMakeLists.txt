@@ -14,6 +14,7 @@ add_library(libspl
 	procfs_list.c
 	strlcat.c
 	strlcpy.c
+	random.c
 	rwlock.c
 	taskq.c
     thread.c
