@@ -17,7 +17,6 @@ target_link_libraries(libzutil PUBLIC
 	libicp
 	libnvpair
 	libunicode
-	libuutil
 	libpthread
 	libavl
 	libefi

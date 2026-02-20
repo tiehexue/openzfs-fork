@@ -20,7 +20,6 @@ um_add_executable(zed
 )
 target_link_libraries(zed PRIVATE
 #	libnvpair
-#	libuutil
 	libzfs
 #	libzfs_core
 	libzpool

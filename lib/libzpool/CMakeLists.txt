@@ -186,7 +186,6 @@ target_link_libraries(libzpool PUBLIC
 	libicp
 	libnvpair
 	libunicode
-	libuutil
 	libpthread
 	libavl
 	libefi

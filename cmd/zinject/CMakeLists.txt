@@ -9,7 +9,6 @@ um_add_executable(zinject
 
 target_link_libraries(zinject PRIVATE
 	libnvpair
-	libuutil
 	libuuid
 	libzfs
 	libzfs_core

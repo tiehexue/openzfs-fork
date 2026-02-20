@@ -72,5 +72,5 @@ endif()
 
 
 target_include_directories(libzfs PRIVATE "${CMAKE_SOURCE_DIR}/lib/libzfs" "${CMAKE_SOURCE_DIR}/lib/os/windows/libfetch")
-target_link_libraries(libzfs PUBLIC libpthread zlib libzutil libshare libzfs_core libnvpair libuutil libfetch)
+target_link_libraries(libzfs PUBLIC libpthread zlib libzutil libshare libzfs_core libnvpair libfetch)
 target_link_libraries(libzfs PRIVATE Crypt32.lib ${CRYPTO_STATIC_TEST})
