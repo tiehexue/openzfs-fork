@@ -7,6 +7,7 @@ add_library(libspl
 	cred.c
 	kmem.c
 	kstat.c
+	libspl.c
     list.c
     mkdirp.c
     mutex.c
