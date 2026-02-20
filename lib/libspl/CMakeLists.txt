@@ -9,6 +9,7 @@ add_library(libspl
     list.c
     mkdirp.c
     mutex.c
+	procfs_list.c
 	strlcat.c
 	strlcpy.c
 	rwlock.c
