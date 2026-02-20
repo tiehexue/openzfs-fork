@@ -5,6 +5,7 @@ add_library(libspl
     atomic.c
     condvar.c
 	cred.c
+	kmem.c
 	kstat.c
     list.c
     mkdirp.c
