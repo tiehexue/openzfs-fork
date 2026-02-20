@@ -24,6 +24,12 @@
 
 #include <sys/debug.h>
 
+#ifdef _MSC_VER
+#define	_Noreturn
+#else
+#define	_Noreturn	__attribute__((__noreturn__))
+#endif
+
 void err(int, const char *, ...) _Noreturn __printf0like(2, 3);
 void errx(int, const char *, ...) _Noreturn __printf0like(2, 3);
 void warnx(const char *, ...) __printflike(1, 2);
