@@ -20,6 +20,5 @@ target_link_libraries(libzutil PUBLIC
 	libpthread
 	libavl
 	libefi
-	libshare
 	zlib
 )

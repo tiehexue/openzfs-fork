@@ -36,8 +36,6 @@
 #include <libintl.h>
 
 #include "libzfs_impl.h"
-#include "libshare_impl.h"
-#include "nfs.h"
 
 static sa_fstype_t *nfs_fstype;
 

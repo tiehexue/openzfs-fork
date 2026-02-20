@@ -34,12 +34,11 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <libzfs.h>
-#include <libshare.h>
-#include "libshare_impl.h"
-#include "smb.h"
 
 #include <windows.h>
 #include <lm.h>
+
+#include "libzfs_impl.h"
 
 #pragma comment(lib, "Netapi32.lib")
 

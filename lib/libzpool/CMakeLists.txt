@@ -189,7 +189,6 @@ target_link_libraries(libzpool PUBLIC
 	libpthread
 	libavl
 	libefi
-	libshare
 	zlib
 	libzstd
 )

@@ -12,8 +12,11 @@ add_library(libzfs
 	libzfs_mount.c
 	libzfs_pool.c
 	libzfs_sendrecv.c
+	libzfs_share.c
 	libzfs_status.c
 	libzfs_util.c
+	os/windows/libzfs_share_nfs.c
+	os/windows/libzfs_share_smb.c
 	os/windows/libzfs_disk_os.cpp
 	os/windows/libzfs_mount_os.c
 	os/windows/libzfs_pool_os.c
@@ -72,5 +75,5 @@ endif()
 
 
 target_include_directories(libzfs PRIVATE "${CMAKE_SOURCE_DIR}/lib/libzfs" "${CMAKE_SOURCE_DIR}/lib/os/windows/libfetch")
-target_link_libraries(libzfs PUBLIC libpthread zlib libzutil libshare libzfs_core libnvpair libfetch)
+target_link_libraries(libzfs PUBLIC libpthread zlib libzutil libzfs_core libnvpair libfetch)
 target_link_libraries(libzfs PRIVATE Crypt32.lib ${CRYPTO_STATIC_TEST})
