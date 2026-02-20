@@ -16,7 +16,6 @@ add_library(libzutil
 target_link_libraries(libzutil PUBLIC
 	libicp
 	libnvpair
-	libunicode
 	libpthread
 	libavl
 	libefi

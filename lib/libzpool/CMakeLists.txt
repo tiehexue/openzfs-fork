@@ -30,6 +30,7 @@ add_library(libzpool
     "${MODULE_DIR}/lua/ltm.c"
     "${MODULE_DIR}/lua/lvm.c"
     "${MODULE_DIR}/lua/lzio.c"
+	"${MODULE_DIR}/unicode/u8_textprep.c"
     "${MODULE_DIR}/zcommon/cityhash.c"
     "${MODULE_DIR}/zcommon/zfeature_common.c"
     "${MODULE_DIR}/zcommon/zfs_comutil.c"
@@ -185,7 +186,6 @@ target_include_directories(libzpool PUBLIC "${CMAKE_SOURCE_DIR}/lib/libzpool/inc
 target_link_libraries(libzpool PUBLIC
 	libicp
 	libnvpair
-	libunicode
 	libpthread
 	libavl
 	libefi
