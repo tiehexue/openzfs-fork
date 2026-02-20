@@ -12,6 +12,7 @@ add_library(libspl
     mkdirp.c
     mutex.c
 	procfs_list.c
+	sid.c
 	strlcat.c
 	strlcpy.c
 	random.c
