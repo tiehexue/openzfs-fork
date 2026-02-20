@@ -76,6 +76,7 @@ wdk_add_library(zfskern
   space_map.c
   space_reftree.c
   txg.c
+  u8_textprep.c
   uberblock.c
   unique.c
   vdev.c

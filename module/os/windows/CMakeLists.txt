@@ -37,7 +37,6 @@ target_link_libraries(OpenZFS
 	zfskern_os
 	zcommonkern
 	nvpairkern
-	unicodekern
 	# WDK libraries
 	WDK::WDMSEC
 #	WDK::STORPORT
