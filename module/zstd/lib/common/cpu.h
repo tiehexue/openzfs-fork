@@ -37,6 +37,8 @@ MEM_STATIC ZSTD_cpuid_t ZSTD_cpuid(void) {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #if !defined(_M_X64) || !defined(__clang__) || __clang_major__ >= 16
     int reg[4];
+    extern void __cpuid(int[4], int);
+    extern void __cpuidex(int[4], int, int);
     __cpuid((int*)reg, 0);
     {
         int const n = reg[0];
