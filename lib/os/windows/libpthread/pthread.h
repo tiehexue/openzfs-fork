@@ -755,7 +755,7 @@ static int pthread_attr_setstack(pthread_attr_t *attr, void *stack, size_t size)
 }
 
 #define	pthread_attr_getguardsize(A, S) ENOTSUP
-#define	pthread_attr_setguardsize(A, S) ENOTSUP
+#define	pthread_attr_setguardsize(A, S) 0
 #define	pthread_attr_getschedparam(A, S) ENOTSUP
 #define	pthread_attr_setschedparam(A, S) ENOTSUP
 #define	pthread_attr_getschedpolicy(A, S) ENOTSUP

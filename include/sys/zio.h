@@ -367,8 +367,13 @@ typedef struct zio_prop {
 	uint8_t			zp_level;
 	uint8_t			zp_copies;
 	uint8_t			zp_gang_copies;
+#ifdef _WIN32
+	uint8_t /* dmu_object_type_t */	zp_type : 8;
+	uint8_t /* dmu_object_type_t */	zp_storage_type : 8;
+#else
 	dmu_object_type_t	zp_type:8;
 	dmu_object_type_t	zp_storage_type:8;
+#endif
 	boolean_t		zp_dedup:1;
 	boolean_t		zp_dedup_verify:1;
 	boolean_t		zp_nopwrite:1;
