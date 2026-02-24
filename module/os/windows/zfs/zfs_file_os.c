@@ -47,13 +47,11 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	wchar_t buf[PATH_MAX];
 	UNICODE_STRING uniName;
 	OBJECT_ATTRIBUTES objAttr;
-	HANDLE   handle;
+	HANDLE handle;
 	NTSTATUS ntstatus;
 	IO_STATUS_BLOCK    ioStatusBlock;
 	DWORD desiredAccess = 0;
 	DWORD dwCreationDisposition;
-
-	mbstowcs(buf, path, sizeof (buf));
 
 	desiredAccess = GENERIC_READ;
 	if (flags&O_WRONLY)
@@ -130,7 +128,9 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	}
 #endif
 
-	RtlInitUnicodeString(&uniName, FileName);
+	mbstowcs(buf, FileName, sizeof (buf));
+
+	RtlInitUnicodeString(&uniName, buf);
 	InitializeObjectAttributes(&objAttr, &uniName,
 	    OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
 	    NULL, NULL);
