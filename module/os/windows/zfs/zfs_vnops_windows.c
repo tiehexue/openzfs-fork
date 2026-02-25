@@ -4237,6 +4237,17 @@ delete_reparse_point(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_INVALID_PARAMETER);
 
 	znode_t *zp = VTOZ(vp);
+	zfs_ccb_t *zccb = FileObject->FsContext2;
+
+	// Is something mounted on here? We deny it, so that
+	// it has to be unmounted by us first. We will remove
+	// from list of mounts, before deleting reparse point
+	if (zccb &&
+	    vfs_has_mount(zccb->z_name_cache)) {
+		dprintf("Denied due to being mountpoint\n");
+		VN_RELE(vp);
+		return (STATUS_CANNOT_DELETE);
+	}
 
 	if (zfsctl_is_node(zp)) {
 		VN_RELE(vp);

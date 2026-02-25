@@ -3447,10 +3447,10 @@ zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp)
 		goto out;
 	}
 
-	// Stopping reparsepoints in use, for now.
-	// Force them to call DELETE_REPARSE_POINT first
-	if ((zp->z_pflags & ZFS_REPARSE) /* && vnode_isinuse(vp, 0) */) {
-		Status = STATUS_CANNOT_DELETE;
+	// If it is a reparsepoint, deny if used as mountpoint
+	if ((zp->z_pflags & ZFS_REPARSE) && zccb &&
+	    vfs_has_mount(zccb->z_name_cache)) {
+		Status = STATUS_ACCESS_DENIED;
 		goto out;
 	}
 

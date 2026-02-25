@@ -176,6 +176,7 @@ void vfs_mount_iterate(int (*func)(void *, void *), void *);
 boolean_t vfs_mount_member(void *member);
 void vfs_set_mountedon(mount_t *mp, char *rootpath);
 const char *vfs_mountedon(mount_t *mp);
+mount_t *vfs_has_mount(const char *rpath);
 
 
 #endif /* SPL_MOUNT_H */

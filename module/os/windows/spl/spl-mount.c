@@ -296,3 +296,23 @@ vfs_mountedon(mount_t *mp)
 {
 	return (mp->mounted_on ? mp->mounted_on : "\\");
 }
+
+mount_t *
+vfs_has_mount(const char *rpath)
+{
+	int count = 0;
+	mount_t *node;
+
+	mutex_enter(&mount_list_lock);
+	for (node = list_head(&mount_list);
+	    node;
+	    node = list_next(&mount_list, node)) {
+		if (rpath && node->mounted_on &&
+		    strcmp(rpath, node->mounted_on) == 0) {
+			mutex_exit(&mount_list_lock);
+			return (node);
+		}
+	}
+	mutex_exit(&mount_list_lock);
+	return (NULL);
+}

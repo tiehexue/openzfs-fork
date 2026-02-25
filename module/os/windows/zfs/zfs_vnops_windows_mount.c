@@ -952,8 +952,17 @@ NotifyMountMgr_impl(void *arg)
 	InitializeObjectAttributes(&poa,
 	    &dcb->mountpoint, OBJ_KERNEL_HANDLE, NULL, NULL);
 
+	// We need to "temporarily" remove the vfs_has_mountpoint() check
+	// so we can delete the reparsepoint (if it needs to)
+	// A bit hacky
+	boolean_t is = vfs_mount_member(dcb);
+	if (is)
+		vfs_mount_remove(dcb);
 	status = CreateReparsePoint(&poa, &volStr,
 	    &volStr);
+	if (is)
+		vfs_mount_add(dcb);
+
 	if (!NT_SUCCESS(status))
 		dprintf("CreateReparsePoint failed %lx\n", status);
 
@@ -2264,6 +2273,11 @@ zfs_windows_unmount(zfs_cmd_t *zc)
 
 		} else {
 			// If mount uses reparsepoint (not driveletter)
+			// To let delete reparse point to succeed, the
+			// vfs_is_mountpoint() need to fail, so free the
+			// root mountpoint it uses.
+			vfs_set_mountedon(zmo, NULL);
+
 			OBJECT_ATTRIBUTES poa;
 
 			InitializeObjectAttributes(&poa,
