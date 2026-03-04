@@ -589,6 +589,12 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	fp->f_dump_fd = dump_fd;
 	*fpp = fp;
 
+#ifdef _WIN32
+	/* If filename contained offset, read it in now. */
+	fp->f_win_offset = 0;
+	zfs_file_seek(fp, &fp->f_win_offset, SEEK_CUR);
+#endif
+
 	return (0);
 }
 
@@ -649,6 +655,9 @@ zfs_file_pwrite(zfs_file_t *fp, const void *buf,
 	ssize_t rc, split, done;
 	int sectors;
 
+#ifdef _WIN32
+	pos += fp->f_win_offset;
+#endif
 	/*
 	 * To simulate partial disk writes, we split writes into two
 	 * system calls so that the process can be killed in between.
@@ -732,6 +741,10 @@ zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
     ssize_t *resid)
 {
 	ssize_t rc;
+
+#ifdef _WIN32
+	off += fp->f_win_offset;
+#endif
 
 	rc = pread64(fp->f_fd, buf, count, off);
 	if (rc < 0) {

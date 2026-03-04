@@ -9911,6 +9911,7 @@ main(int argc, char **argv)
 	if (dump_opt['e'] || force_import) {
 		importargs_t args = { 0 };
 
+#ifndef _WIN32 // No /dev/ here - we want zpool_find_import_blkid()
 		/*
 		 * If path is not provided, search in /dev
 		 */
@@ -9918,6 +9919,7 @@ main(int argc, char **argv)
 			searchdirs = umem_alloc(sizeof (char *), UMEM_NOFAIL);
 			searchdirs[nsearch++] = (char *)ZFS_DEVDIR;
 		}
+#endif
 
 		args.paths = nsearch;
 		args.path = searchdirs;

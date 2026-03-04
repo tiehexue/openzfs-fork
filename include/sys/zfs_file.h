@@ -40,6 +40,9 @@ typedef off_t loff_t;
 typedef struct zfs_file {
 	int f_fd;
 	int f_dump_fd;
+#ifdef _WIN32
+	loff_t f_win_offset;
+#endif
 } zfs_file_t;
 #elif defined(__linux__) || defined(__FreeBSD__)
 typedef struct file zfs_file_t;
