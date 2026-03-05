@@ -1211,7 +1211,7 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
 			return (STATUS_REPARSE);
 		}
 
-		if (vp->v_type == VDIR) {
+		if (vp && vnode_isdir(vp)) {
 			// Not reparse
 			VN_RELE(dvp);
 			dvp = vp;
