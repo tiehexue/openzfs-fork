@@ -6813,10 +6813,11 @@ delete_entry(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	// Unfortunately, filename is littered with "\", clean it up,
 	// or search based on ID to get name?
+#if 0
 	dprintf("%s: deleting '%.*S'\n", __func__,
 	    (int)(IrpSp->FileObject->FileName.Length / sizeof (WCHAR)),
 	    IrpSp->FileObject->FileName.Buffer);
-
+#endif
 	error = RtlUnicodeToUTF8N(filename, MAXPATHLEN - 1, &outlen,
 	    IrpSp->FileObject->FileName.Buffer,
 	    IrpSp->FileObject->FileName.Length);
@@ -6831,6 +6832,8 @@ delete_entry(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	}
 	while (outlen > 0 && filename[outlen - 1] == '\\') outlen--;
 	filename[outlen] = 0;
+
+	dprintf("%s: deleting '%s'\n", __func__, filename);
 
 	// FIXME, use z_name_cache and offset
 	char *finalname = NULL;
