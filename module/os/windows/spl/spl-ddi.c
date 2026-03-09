@@ -742,6 +742,24 @@ vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 
 		// --- Parse length modifier ---
 		int is_long = 0, is_longlong = 0, is_size_t = 0, is_intmax = 0;
+		int is_I64 = 0;
+
+		if (*fmt == 'I') {
+			fmt++;
+			if (fmt[0] == '6' && fmt[1] == '4') {
+				is_I64 = 1;
+				fmt += 2;
+			} else {
+				/*
+				 * Windows %Iu / %Id / %Ix often means
+				 * pointer-sized integer. On 64-bit
+				 * Windows that is 64-bit, on 32-bit
+				 * it is 32-bit.
+				 */
+				is_size_t = 1;
+			}
+		}
+
 		while (*fmt == 'l' || *fmt == 'z') {
 			if (*fmt == 'l') {
 				if (is_long) is_longlong = 1;
@@ -751,10 +769,14 @@ vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 			}
 			fmt++;
 		}
-		if (*fmt == 'L')
+		if (*fmt == 'L') {
 			is_longlong = 1;
-		if (*fmt == 'j')
+			fmt++;
+		}
+		if (*fmt == 'j') {
 			is_intmax = 1;
+			fmt++;
+		}
 
 		// --- Format specifier ---
 		char spec = *fmt++;
@@ -764,7 +786,7 @@ vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 			if (!s) s = "(null)";
 
 			int len = 0;
-			while (s[len] && (precision < 0 || len < precision))
+			while ((precision < 0 || len < precision) && s[len])
 				len++;
 
 			int pad = width > len ? width - len : 0;
@@ -776,11 +798,11 @@ vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 			break;
 		}
 		case 'S': {
-			const wchar_t *ws = va_arg(ap, const wchar_t *);
+			const WCHAR *ws = va_arg(ap, const WCHAR *);
 			if (!ws) ws = L"(null)";
 
 			int len = 0;
-			while (ws[len] && (precision < 0 || len < precision))
+			while ((precision < 0 || len < precision) && ws[len])
 				len++;
 
 			int pad = width > len ? width - len : 0;
@@ -823,7 +845,7 @@ vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 			long long val;
 			if (is_intmax)
 				val = va_arg(ap, long long);
-			else if (is_longlong)
+			else if (is_I64 || is_longlong)
 				val = va_arg(ap, long long);
 			else if (is_long)
 				val = va_arg(ap, long);
