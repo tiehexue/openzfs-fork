@@ -564,4 +564,11 @@ fast_io_possible(struct vnode *vp)
 	return (FastIoIsQuestionable);
 }
 
+#define	DELETE_CLEAR	(0)
+#define	DELETE_PENDING	(1 << 0)
+#define	DELETE_HIDDEN	(1 << 1)
+
+uint32_t vnode_unlink(struct vnode *);
+void vnode_setunlink(struct vnode *, uint32_t set);
+
 #endif /* SPL_VNODE_H */

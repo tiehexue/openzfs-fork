@@ -1165,7 +1165,8 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
 		    &zp, flags, NULL, &direntflags, &cn);
 
 		// If snapshot dir and we are pretending it is deleted...
-		if (error == 0 && zp->z_vnode != NULL && ZTOV(zp)->v_unlink) {
+		if (error == 0 && zp->z_vnode != NULL &&
+		    (vnode_unlink(ZTOV(zp)) & DELETE_HIDDEN)) {
 			VN_RELE(ZTOV(zp));
 			error = ENOENT;
 		}
@@ -1951,6 +1952,15 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			VN_RELE(dvp);
 		Irp->IoStatus.Information = FILE_EXISTS;
 		return (STATUS_OBJECT_NAME_COLLISION);
+	}
+
+	if (vp && vnode_unlink(vp)) {
+		dprintf("%s: file marked unlinked error\n", __func__);
+		VN_RELE(vp);
+		if (dvp)
+			VN_RELE(dvp);
+		Irp->IoStatus.Information = FILE_DOES_NOT_EXIST;
+		return (STATUS_DELETE_PENDING);
 	}
 
 	if (CreateDirectory && finalname) {
@@ -5372,7 +5382,7 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 			}
 			Status = STATUS_SUCCESS;
 		} else { // outcount == 0
-			Status = (zccb->dirlist_index == 0) ?
+			Status = initial ?
 			    STATUS_NO_SUCH_FILE :
 			    STATUS_NO_MORE_FILES;
 		}
@@ -5465,7 +5475,7 @@ notify_change_directory(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_INVALID_PARAMETER);
 	}
 
-	if (zccb && zccb->deleteonclose) {
+	if (vnode_unlink(vp)) {
 		VN_RELE(vp);
 		return (STATUS_DELETE_PENDING);
 	}
@@ -6780,7 +6790,8 @@ add_thread_job(PDEVICE_OBJECT DeviceObject, PIRP Irp, int len,
  * delete_entry() to remove the file.
  */
 NTSTATUS
-delete_entry(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
+delete_entry(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp,
+    vnode_t *parent_vp)
 {
 	// In Unix, both zfs_unlink and zfs_rmdir expect a filename,
 	// and we do not have that here
@@ -6807,7 +6818,13 @@ delete_entry(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		return (STATUS_SUCCESS);
 
 	// find parent and hold.
-	dvp = zfs_parent(vp);
+	if (parent_vp != NULL) {
+		VERIFY0(VN_HOLD(parent_vp));
+		dvp = parent_vp;
+	} else {
+		dvp = zfs_parent(vp);
+	}
+
 	if (dvp == NULL)
 		return (STATUS_INSTANCE_NOT_AVAILABLE);
 
@@ -7254,48 +7271,51 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	mount_t *fzmo = NULL;
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
-	struct vnode *vp = FileObject->FsContext;
-	zfs_ccb_t *zccb = FileObject->FsContext2;
-	boolean_t purge = B_FALSE;
+	struct vnode *vp = NULL;
+	znode_t *zp = NULL;
+	zfs_ccb_t *zccb = NULL;
 	boolean_t locked = B_FALSE;
+	vnode_t *dvp = NULL;
+
+	/* captured decisions */
+	boolean_t need_notify_cleanup = B_FALSE;
+	boolean_t need_delete = B_FALSE;
+	boolean_t need_flush = B_FALSE;
+	boolean_t need_purge = B_FALSE;
+	boolean_t need_cache_uninit = B_FALSE;
+	boolean_t deleted = B_FALSE;
 
 	if (zmo->type != MOUNT_TYPE_VCB) {
 		Status = STATUS_SUCCESS;
-		goto exit;
+		goto out;
 	}
 
-	if (IrpSp->FileObject->Flags & FO_CLEANUP_COMPLETE) {
-		dprintf("FileObject %p already cleaned up\n",
-		    IrpSp->FileObject);
+	if (FileObject == NULL || FileObject->FsContext == NULL) {
 		Status = STATUS_SUCCESS;
-		goto exit;
+		goto out;
 	}
 
-	// We have to use the pointer to zmo stored in the vp,
-	// as we can receive cleanup messages belonging to other devices.
-	// (figure out what this means)
-	if (!FileObject || !FileObject->FsContext) {
+	if (FileObject->Flags & FO_CLEANUP_COMPLETE) {
+		dprintf("FileObject %p already cleaned up\n", FileObject);
 		Status = STATUS_SUCCESS;
-		goto exit;
+		goto out;
 	}
 
-	// Use the mount from FileObject, since we can receive cleanup
-	// messages belonging to other devices.
-	fzmo = vp->v_mount;
+	vp = FileObject->FsContext;
+	zccb = FileObject->FsContext2;
+	fzmo = vnode_mount(vp);
+	zp = VTOZ(vp);
 
 	FsRtlCheckOplockEx(
 	    vp_oplock(vp),
 	    Irp,
-	    OPLOCK_FLAG_COMPLETE_IF_OPLOCKED,   // <- important
+	    OPLOCK_FLAG_COMPLETE_IF_OPLOCKED,
 	    NULL, NULL, NULL);
 
-	znode_t *zp = VTOZ(vp); // zp for notify removal
-
-	dprintf("IRP_MJ_CLEANUP: '%s' iocount %u usecount %u\n",
+	dprintf("IRP_MJ_CLEANUP: '%s' iocount %u usecount %u unlink %u\n",
 	    zccb && zccb->z_name_cache ? zccb->z_name_cache : "",
-	    vp->v_iocount, vp->v_usecount);
+	    vp->v_iocount, vp->v_usecount, vnode_unlink(vp));
 
-	// ExAcquireResourceSharedLite(&fcb->Vcb->tree_lock, true);
 	if (zccb && zccb->HoldsOplock) {
 		zccb->HoldsOplock = FALSE;
 		atomic_dec_64(&vp->OplockRefCount);
@@ -7304,20 +7324,66 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
 	locked = B_TRUE;
 
+	/*
+	 * Protect only Windows/FCB-ish per-file state here.
+	 */
 	IoRemoveShareAccess(FileObject, &vp->share_access);
 
 	FsRtlFastUnlockAll(&vp->lock, FileObject,
 	    IoGetRequestorProcess(Irp), NULL);
 
-	if (zmo && zccb && fzmo->NotifySync)
-		FsRtlNotifyCleanup(fzmo->NotifySync, &fzmo->DirNotifyList,
-		    zccb);
+	if (fzmo && zccb && fzmo->NotifySync)
+		need_notify_cleanup = B_TRUE;
 
+	if ((FileObject->Flags & FO_CACHE_SUPPORTED) &&
+	    FileObject->SectionObjectPointer &&
+	    FileObject->SectionObjectPointer->DataSectionObject) {
+		need_flush = B_TRUE;
+	}
+
+	if (zccb && zccb->cacheinit && FileObject->PrivateCacheMap)
+		need_cache_uninit = B_TRUE;
+
+	/*
+	 * Release long-term open hold for this FILE_OBJECT.
+	 * After this, last-close conditions should be represented by your
+	 * vnode usecount model.
+	 */
+	vnode_rele(vp);
+
+	// Promote to global delete
+	if (zccb && zccb->deleteonclose) {
+		vnode_setunlink(vp, DELETE_PENDING|DELETE_HIDDEN);
+		zccb->deleteonclose = 0;
+	}
+
+	/*
+	 * Real delete is global to the vnode, not this particular FILE_OBJECT.
+	 * We only do it on last close.
+	 */
+	if (!vnode_isinuse(vp, 0) && vnode_unlink(vp)) {
+		need_delete = B_TRUE;
+		need_purge = need_flush;
+	} else {
+
+	}
+
+	ExReleaseResourceLite(vp->FileHeader.Resource);
+	locked = B_FALSE;
+
+	/*
+	 * Outside FileHeader.Resource from here down.
+	 * Avoid calling MM/CC/FsRtl namespace-ish work while holding it.
+	 */
+
+	/*
+	 * We need to disconnect the parent first, since it is holding a
+	 * dvp->usecount while parent is referenced. If we do not, then
+	 * calling zfs_rmdir() will return ENOTEMPTY.
+	 */
+	dvp = vnode_parent(vp); // Best effort, can be NULL.
 	vnode_setparent(vp, NULL);
-	vnode_rele(vp); // Release longterm hold finally.
 
-	// TODO, if the FileObject that has VOLUME_LOCK is here,
-	// we should release it, and announce UNLOCK.
 	dprintf("FO %p CacheSup %lu SecObjPtr %p and DatSecObj %p\n",
 	    FileObject,
 	    FileObject->Flags & FO_CACHE_SUPPORTED,
@@ -7325,62 +7391,74 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	    FileObject->SectionObjectPointer &&
 	    FileObject->SectionObjectPointer->DataSectionObject);
 
-	// last close, OR, deleting
-	if (!vnode_isinuse(vp, 0) ||
-	    (zccb && zccb->deleteonclose)) {
-		zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	if (need_flush) {
+		IO_STATUS_BLOCK iosb;
 
-		if (!vnode_isinuse(vp, 0) &&
-		    zccb && zccb->deleteonclose) {
+		CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &iosb);
 
-			zccb->deleteonclose = 0;
-			int isdir = vnode_isdir(vp);
+		if (!NT_SUCCESS(iosb.Status))
+			dprintf("CcFlushCache returned %08lx\n", iosb.Status);
+	}
 
-			if (zccb->z_name_cache != NULL) {
-				if (isdir) {
-					dprintf("DIR: FileDelete "
-					    "'%s' name '%s'\n",
-					    zccb->z_name_cache,
-					    &zccb->z_name_cache[
-					    zccb->z_name_offset]);
-					zfs_send_notify(zfsvfs,
-					    zccb->z_name_cache,
-					    zccb->z_name_offset,
-					    FILE_NOTIFY_CHANGE_DIR_NAME,
-					    FILE_ACTION_REMOVED);
-				} else {
-					dprintf("FILE: FileDelete "
-					    "'%s' name '%s'\n",
-					    zccb->z_name_cache,
-					    &zccb->z_name_cache[
-					    zccb->z_name_offset]);
+	if (need_purge) {
+		dprintf("Purging cache due to delete\n");
+		CcPurgeCacheSection(FileObject->SectionObjectPointer,
+		    NULL, 0, FALSE);
+	}
+
+	if (need_cache_uninit) {
+		dprintf("CcUninitializeCacheMap on vp %p fo %p, Vpb %p\n",
+		    vp, FileObject, FileObject->Vpb);
+		atomic_dec_64(&zccb->cacheinit);
+		CcUninitializeCacheMap(FileObject, NULL, NULL);
+	}
+
+	if (need_delete) {
+		zfsvfs_t *zfsvfs = vfs_fsprivate(fzmo);
+
+		if (zccb && zccb->z_name_cache != NULL) {
+			if (vnode_isdir(vp)) {
+				dprintf("DIR: FileDelete '%s' name '%s'\n",
+				    zccb->z_name_cache,
+				    &zccb->z_name_cache[zccb->z_name_offset]);
+				zfs_send_notify(zfsvfs,
+				    zccb->z_name_cache,
+				    zccb->z_name_offset,
+				    FILE_NOTIFY_CHANGE_DIR_NAME,
+				    FILE_ACTION_REMOVED);
+			} else {
+				dprintf("FILE: FileDelete '%s' name '%s'\n",
+				    zccb->z_name_cache,
+				    &zccb->z_name_cache[zccb->z_name_offset]);
 				zfs_send_notify(zfsvfs,
 				    zccb->z_name_cache,
 				    zccb->z_name_offset,
 				    FILE_NOTIFY_CHANGE_FILE_NAME,
 				    FILE_ACTION_REMOVED);
-				}
 			}
+		}
 
-			// Windows needs us to unlink it now, since
-			// CLOSE can be delayed and parent deletions
-			// might fail (ENOTEMPTY).
+		/*
+		 * delete_entry() consumes the final iocount and releases vp.
+		 * Do not touch vp after this call succeeds or fails.
+		 */
+		*hold_vp = NULL;
+		Status = delete_entry(DeviceObject, Irp, IrpSp, dvp);
+		if (Status != STATUS_SUCCESS) {
+			dprintf("Deletion failed: %08x\n", Status);
+			vnode_setunlink(vp, DELETE_PENDING);
 
-			// This releases zp!
-			Status = delete_entry(DeviceObject, Irp, IrpSp);
-			if (Status != 0) {
-				dprintf("Deletion failed: %d\n",
-				    Status);
-			}
-			// delete_entry will always consume an IOCOUNT.
-			*hold_vp = NULL;
+			/*
+			 * Optional retry behavior: re-arm unlink on failure.
+			 * Uncomment if that matches your intended semantics.
+			 *
+			 * vnode_t *tmpvp = FileObject->FsContext;
+			 * if (tmpvp != NULL)
+			 *     vnode_setunlink(tmpvp, 1);
+			 */
+		} else {
+			deleted = B_TRUE;
 
-			zp = NULL;
-
-			purge = B_TRUE;
-// FILE_CLEANUP_UNKNOWN FILE_CLEANUP_WRONG_DEVICE FILE_CLEANUP_FILE_REMAINS
-// FILE_CLEANUP_FILE_DELETED FILE_CLEANUP_LINK_DELETED
-// FILE_CLEANUP_STREAM_DELETED FILE_CLEANUP_POSIX_STYLE_DELETE
 #if defined(ZFS_FS_ATTRIBUTE_CLEANUP_INFO) && defined(ZFS_FS_ATTRIBUTE_POSIX)
 			Irp->IoStatus.Information =
 			    FILE_CLEANUP_FILE_DELETED |
@@ -7391,75 +7469,31 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			    FILE_CLEANUP_FILE_DELETED;
 #endif
 		}
-
-			/* Not deleting, but lastclose */
 	}
 
-	if ((FileObject->Flags & FO_CACHE_SUPPORTED) &&
-	    FileObject->SectionObjectPointer &&
-	    FileObject->SectionObjectPointer->DataSectionObject) {
-		IO_STATUS_BLOCK iosb;
-
-		// Always flush
-		CcFlushCache(FileObject->SectionObjectPointer, NULL, 0,
-		    &iosb);
-
-		if (!NT_SUCCESS(iosb.Status))
-			dprintf("CcFlushCache returned %08lx\n",
-			    iosb.Status);
-
-		if (purge) {
-			// Only purge in delete branch
-
-			if (!ExIsResourceAcquiredSharedLite(
-			    vp->FileHeader.PagingIoResource)) {
-				ExAcquireResourceExclusiveLite(
-				    vp->FileHeader.PagingIoResource,
-				    TRUE);
-				ExReleaseResourceLite(
-				    vp->FileHeader.PagingIoResource);
-			}
-
-			dprintf("Purging cache due to delet\n");
-			CcPurgeCacheSection(FileObject->SectionObjectPointer,
-			    NULL, 0, FALSE);
-		}
-
-		dprintf("flushed cache on close (fo = %p, vp = %p, "
-		    "AllocationSize = %I64x, FileSize = %I64x, "
-		    "ValidDataLength = %I64x)\n",
-		    FileObject, vp,
-		    vp->FileHeader.AllocationSize.QuadPart,
-		    vp->FileHeader.FileSize.QuadPart,
-		    vp->FileHeader.ValidDataLength.QuadPart);
-	}
-	// if (vp->Vcb && vp != vp->Vcb->volume_vp)
-
-	if (locked)
-		ExReleaseResourceLite(vp->FileHeader.Resource);
-
-	// ExReleaseResourceLite(&vp->Vcb->tree_lock);
-	if (zccb && zccb->cacheinit && FileObject->PrivateCacheMap) {
-		dprintf("CcUninitializeCacheMap on vp %p fo %p, Vpb %p\n",
-		    vp, FileObject, FileObject->Vpb);
-		atomic_dec_64(&zccb->cacheinit);
-		CcUninitializeCacheMap(FileObject, NULL, NULL);
+	if (need_notify_cleanup) {
+		FsRtlNotifyCleanup(fzmo->NotifySync, &fzmo->DirNotifyList,
+		    zccb);
 	}
 
 	FileObject->Flags |= FO_CLEANUP_COMPLETE;
 
-	Status = STATUS_SUCCESS;
-
-exit:
-	if (vp && zp)
-		dprintf("%s: '%s' iocount %u usecount %u Status 0x%x.\n",
+	/*
+	 * If delete_entry() consumed the vnode, do not log vp/zp here.
+	 */
+	if (!deleted && vp && zp) {
+		dprintf(
+		    "%s: '%s' iocount %u usecount %u unlink %u Status 0x%x\n",
 		    __func__,
-		    zccb&&zccb->z_name_cache ? zccb->z_name_cache : "",
-		    vp->v_iocount, vp->v_usecount, Status);
+		    zccb && zccb->z_name_cache ? zccb->z_name_cache : "",
+		    vp->v_iocount, vp->v_usecount, vnode_unlink(vp), Status);
+	}
+
+out:
+	if (locked)
+		ExReleaseResourceLite(vp->FileHeader.Resource);
 
 	Irp->IoStatus.Status = Status;
-	Irp->IoStatus.Information = 0;
-
 	return (Status);
 }
 

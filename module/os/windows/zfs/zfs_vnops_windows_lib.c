@@ -918,6 +918,15 @@ zfs_readdir_emitdir(zfsvfs_t *zfsvfs, const char *name, emitdir_ptr_t *ctx,
 		    ZGET_FLAG_UNLINKED);
 	}
 
+	// If it is marked to be deleted it, Windows expects
+	// the file to be invisible.
+	if (get_zp == 0 && tzp != NULL && ZTOV(tzp) &&
+	    (vnode_unlink(ZTOV(tzp)) & DELETE_HIDDEN)) {
+		// Return anything but ENOSPC to skip
+		zrele(tzp);
+		return (ENOTACTIVE);
+	}
+
 	/*
 	 * Could not find it, error out ? print name ?
 	 * Can't zget the .zfs dir etc, so we need a dummy
@@ -2522,14 +2531,16 @@ zfs_send_notify_stream(zfsvfs_t *zfsvfs, char *name, int nameoffset,
 		return;
 	}
 
-	widepath[ustr.Length / sizeof (wchar_t)] = 0;
+	widepath[ustr.Length / sizeof (WCHAR)] = 0;
 
 	// Now find last backslash
 	wchar_t *lastBackslash = wcsrchr(widepath, L'\\');
-	if (lastBackslash == NULL)
+
+	// No slash, or only root, then don't skip over it.
+	if (lastBackslash == NULL || ustr.Length == sizeof (WCHAR))
 		wideoffset = 0;
 	else
-		wideoffset = lastBackslash - widepath;
+		wideoffset = (int)((lastBackslash - widepath) + 1);
 
 	// wideoffset is currently in character-offset, for this print
 	dprintf("zfs_send_notify_stream: '%S' %lu %u\n", ustr.Buffer,
@@ -3387,9 +3398,12 @@ zfs_parent(struct vnode *vp)
 /*
  * Call vnode_setunlink if zfs_zaccess_delete() allows it
  * TODO: provide credentials
+ * deleteonclose is the open flag, which is a softer delete, and
+ * only actioned on fileobject_cleanup. If false, we are from
+ * set_disposition, which is more instant, and global.
  */
 NTSTATUS
-zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp)
+zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp, boolean_t deleteonclose)
 {
 	vnode_t *vp = NULL;
 	NTSTATUS Status = STATUS_UNSUCCESSFUL;
@@ -3431,9 +3445,6 @@ zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp)
 			fo->DeletePending = TRUE;
 			ASSERT3P(zccb, !=, NULL);
 			zccb->deleteonclose = 1;
-			// We no longer use v_unlink so lets abuse
-			// it here until we decide we like it
-			vp->v_unlink = 1;
 			Status = STATUS_SUCCESS;
 			goto out;
 		}
@@ -3498,7 +3509,10 @@ zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp)
 
 	if (error == 0) {
 		ASSERT3P(zccb, !=, NULL);
-		zccb->deleteonclose = 1;
+		if (deleteonclose)
+			zccb->deleteonclose = 1;
+		else
+			vnode_setunlink(vp, DELETE_PENDING);
 		fo->DeletePending = TRUE;
 		Status = STATUS_SUCCESS;
 	} else {
@@ -3534,7 +3548,7 @@ NTSTATUS
 zfs_setunlink_masked(FILE_OBJECT *fo, vnode_t *dvp)
 {
 	NTSTATUS Status;
-	Status = zfs_setunlink(fo, dvp);
+	Status = zfs_setunlink(fo, dvp, B_TRUE);
 	switch (Status) {
 	case STATUS_CANNOT_DELETE:
 	case STATUS_DELETE_PENDING:
@@ -3778,17 +3792,16 @@ set_file_disposition_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		    &IrpSp->FileObject->FileName);
 		Status = STATUS_SUCCESS;
 		if (flags & FILE_DISPOSITION_DELETE) {
-			Status = zfs_setunlink(IrpSp->FileObject, NULL);
+			Status = zfs_setunlink(IrpSp->FileObject, NULL,
+			    B_FALSE);
 		} else {
-			if (zccb) zccb->deleteonclose = 0;
+			vnode_setunlink(vp, DELETE_CLEAR);
 			FileObject->DeletePending = FALSE;
 		}
 		// Dirs marked for Deletion should release all
 		// pending Notify events
 		if (Status == STATUS_SUCCESS &&
 		    (flags & FILE_DISPOSITION_DELETE)) {
-//			FsRtlNotifyCleanup(zmo->NotifySync,
-//			    &zmo->DirNotifyList, vp);
 
 			FsRtlNotifyFullChangeDirectory(zmo->NotifySync,
 			    &zmo->DirNotifyList,
@@ -3804,6 +3817,7 @@ set_file_disposition_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		VN_RELE(vp);
 	}
+	dprintf("set_file_disposition_information returning %08lx\n", Status);
 	return (Status);
 }
 
@@ -4409,29 +4423,72 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		znode_t *tdzp = VTOZ(tdvp);
 
-		if (tdccb != NULL) {
-			zfs_send_notify(zfsvfs, tdccb->z_name_cache,
-			    tdccb->z_name_offset,
-			    FILE_NOTIFY_CHANGE_LAST_WRITE,
-			    FILE_ACTION_MODIFIED);
-		}
+		// NTFS is the weird kid on the block here, if the parents are
+		// the same, it uses RENAME event. When the parents are
+		// different, it uses REMOVE and ADD.
+		// Remember the old name, so we can cluster the notify events
+		// together.
 
-		zfs_send_notify(zfsvfs, fccb->z_name_cache, fccb->z_name_offset,
-		    vnode_isdir(fvp) ?
-		    FILE_NOTIFY_CHANGE_DIR_NAME :
-		    FILE_NOTIFY_CHANGE_FILE_NAME,
-		    FILE_ACTION_RENAMED_OLD_NAME);
+		char *old_z_name_cache = fccb->z_name_cache;
+		uint32_t old_z_name_offset = fccb->z_name_offset;
+		uint32_t old_z_name_len = fccb->z_name_len;
+
+		fccb->z_name_cache = NULL;
+		fccb->z_name_offset = 0;
+		fccb->z_name_len = 0;
 
 		if (zfs_build_path(zp, tdzp, &fccb->z_name_cache,
 		    &fccb->z_name_len, &fccb->z_name_offset) == 0) {
+
+			// Temporarily building parent path is a bit weak.
+			// Should we fetch it some other way?
+			char *parent_name_cache = NULL;
+			uint32_t parent_name_offset = 0;
+			uint32_t parent_name_len = 0;
+			int parent_name;
+			parent_name = zfs_build_path(VTOZ(fdvp), NULL,
+			    &parent_name_cache, &parent_name_len,
+			    &parent_name_offset);
+
+			// Send out old name.
+			zfs_send_notify(zfsvfs, old_z_name_cache,
+			    old_z_name_offset,
+			    vnode_isdir(fvp) ?
+			    FILE_NOTIFY_CHANGE_DIR_NAME :
+			    FILE_NOTIFY_CHANGE_FILE_NAME,
+			    fdvp == tdvp ? FILE_ACTION_RENAMED_OLD_NAME :
+			    FILE_ACTION_REMOVED);
+
+			// Send out new name.
 			zfs_send_notify(zfsvfs, fccb->z_name_cache,
 			    fccb->z_name_offset,
 			    vnode_isdir(fvp) ?
 			    FILE_NOTIFY_CHANGE_DIR_NAME :
 			    FILE_NOTIFY_CHANGE_FILE_NAME,
-			    FILE_ACTION_RENAMED_NEW_NAME);
+			    fdvp == tdvp ? FILE_ACTION_RENAMED_NEW_NAME :
+			    FILE_ACTION_ADDED);
+
+			// Also tell parents they were MODIFIED
+			if (parent_name == 0) {
+				zfs_send_notify(zfsvfs, parent_name_cache,
+				    parent_name_offset,
+				    FILE_NOTIFY_CHANGE_LAST_WRITE,
+				    FILE_ACTION_MODIFIED);
+
+				kmem_free(parent_name_cache, parent_name_len);
+			}
+
+			if (tdccb != NULL) {
+				zfs_send_notify(zfsvfs, tdccb->z_name_cache,
+				    tdccb->z_name_offset,
+				    FILE_NOTIFY_CHANGE_LAST_WRITE,
+				    FILE_ACTION_MODIFIED);
+			}
 		}
+		// Free old name
+		kmem_free(old_z_name_cache, old_z_name_len);
 	}
+
 	// Release all holds
 	if (error == EBUSY)
 		error = STATUS_ACCESS_DENIED;
@@ -4889,17 +4946,32 @@ file_standard_information_impl(PDEVICE_OBJECT DeviceObject,
 	znode_t *zp = VTOZ(vp);
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	int error = 0;
 
 	if (zp != NULL) {
+
+		// If we are a steam, we need to grab the parent,
+		// either way, we hold iocount.
+		if (zccb && (zp->z_pflags & ZFS_XATTR) &&
+		    (zccb->real_file_id > 0)) {
+			error = zfs_zget(zp->z_zfsvfs, zccb->real_file_id, &zp);
+			if (!error)
+				vp = ZTOV(zp);
+			else
+				VN_HOLD(vp); // ah well, fallback
+		} else {
+			VN_HOLD(vp);
+		}
+
+		// Set it again, in case zget fails, and zp = NULL.
+		zp = VTOZ(vp);
+
 		fsi->Directory = vnode_isdir(vp) ? TRUE : FALSE;
-		// sa_object_size(zp->z_sa_hdl, &blksize, &nblks);
-		// space taken on disk, multiples of block size
 
 		fsi->AllocationSize.QuadPart = allocationsize(zp);
 		fsi->EndOfFile.QuadPart = vnode_isdir(vp) ? 0 : zp->z_size;
-		fsi->NumberOfLinks = DIR_LINKS(zp);
-		fsi->DeletePending = zccb &&
-		    zccb->deleteonclose ? TRUE : FALSE;
+		fsi->NumberOfLinks = vnode_unlink(vp) ? 0 : DIR_LINKS(zp);
+		fsi->DeletePending = vnode_unlink(vp) ? TRUE : FALSE;
 
 		IoStatus->Information = sizeof (FILE_STANDARD_INFORMATION);
 
@@ -4924,6 +4996,7 @@ file_standard_information_impl(PDEVICE_OBJECT DeviceObject,
 			    sizeof (FILE_STANDARD_INFORMATION_EX);
 		}
 
+		VN_RELE(vp);
 		IoStatus->Status = STATUS_SUCCESS;
 		return;
 	}
@@ -5110,16 +5183,35 @@ file_standard_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 
 	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
+		int error = 0;
 		struct vnode *vp = IrpSp->FileObject->FsContext;
 		zfs_ccb_t *zccb = IrpSp->FileObject->FsContext2;
 
 		znode_t *zp = VTOZ(vp);
 
-		fsli->NumberOfAccessibleLinks = DIR_LINKS(zp);
+		// If we are a steam, we need to grab the parent,
+		// either way, we hold iocount.
+		if (zccb && (zp->z_pflags & ZFS_XATTR) &&
+		    (zccb->real_file_id > 0)) {
+			error = zfs_zget(zp->z_zfsvfs, zccb->real_file_id, &zp);
+			if (!error)
+				vp = ZTOV(zp);
+			else
+				VN_HOLD(vp); // ah well, fallback
+		} else {
+			VN_HOLD(vp);
+		}
+
+		// Set it again, in case zget fails, and zp = NULL.
+		zp = VTOZ(vp);
+
+		fsli->NumberOfAccessibleLinks =
+		    vnode_unlink(vp) ? 0 : DIR_LINKS(zp);
 		fsli->TotalNumberOfLinks = DIR_LINKS(zp);
-		fsli->DeletePending = zccb &&
-		    zccb->deleteonclose ? TRUE : FALSE;
+		fsli->DeletePending = vnode_unlink(vp) ? TRUE : FALSE;
 		fsli->Directory = S_ISDIR(zp->z_mode);
+
+		VN_RELE(vp);
 	}
 
 	Irp->IoStatus.Information = sizeof (FILE_STANDARD_LINK_INFORMATION);

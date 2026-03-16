@@ -1193,7 +1193,7 @@ zfsctl_mkdir(znode_t *dzp, znode_t **zpp, char *dirname)
 	error = zfsctl_root_lookup(ZTOV(dzp), dirname, zpp, 0, NULL,
 	    NULL, NULL);
 	if (error == 0) {
-		ZTOV(*zpp)->v_unlink = 0;
+		vnode_setunlink(ZTOV(*zpp), DELETE_HIDDEN);
 	}
 	return (error);
 }

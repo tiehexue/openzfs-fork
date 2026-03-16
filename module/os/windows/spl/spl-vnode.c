@@ -2267,3 +2267,15 @@ vfs_changeowner(mount_t *from, mount_t *to)
 	}
 	mutex_exit(&vnode_all_list_lock);
 }
+
+uint32_t
+vnode_unlink(struct vnode *vp)
+{
+	return (vp->v_unlink);
+}
+
+void
+vnode_setunlink(struct vnode *vp, uint32_t set)
+{
+	vp->v_unlink = set;
+}
