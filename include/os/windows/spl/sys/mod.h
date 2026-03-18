@@ -218,10 +218,10 @@ ZT_SET_VALUE(ztunable_t *zt, void **ptr, ULONG *len, ULONG *type)
 		ASSERT3U(*len, >=, sizeof (int));
 		*(int *)zt->zt_ptr = *(int *)*ptr;
 		return;
-	case ZT_TYPE_LONG:
+	case ZT_TYPE_LONG: // 4 bytes on Windows
 	case ZT_TYPE_ULONG:
-		ASSERT3U(*len, >=, sizeof (uint64_t));
-		*(uint64_t *)zt->zt_ptr = *(uint64_t *)*ptr;
+		ASSERT3U(*len, >=, sizeof (uint32_t));
+		*(uint32_t *)zt->zt_ptr = *(uint32_t *)*ptr;
 		return;
 	case ZT_TYPE_STRING:
 		if (zt->zt_flag & ZT_FLAG_STATIC) {
