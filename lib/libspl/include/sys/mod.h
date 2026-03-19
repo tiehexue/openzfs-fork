@@ -48,7 +48,7 @@
 	_##set##sym					\
 	__attribute__((__section__(ZFS_TUNABLE_SECTION))) \
 	__attribute__((__used__))			\
-	= &set##sym;
+	= &sym;
 
 #endif
 
