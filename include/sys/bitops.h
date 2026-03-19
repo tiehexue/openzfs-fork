@@ -51,9 +51,10 @@ extern "C" {
 #define	BF64_GET(x, low, len)		BF64_DECODE(x, low, len)
 
 #define	BF32_UVAL(len, v) \
+	((len) == 1  ? (uint32_t)!!(v) : \
 	((len) <= 8  ? (uint32_t)(uint8_t)(v)  : \
 	(len) <= 16 ? (uint32_t)(uint16_t)(v) : \
-	(uint32_t)(v))
+	(uint32_t)(v)))
 
 #define	BF32_SET(x, low, len, val) do { \
 	uint32_t __v = BF32_UVAL((len), (val)); \
@@ -63,10 +64,11 @@ extern "C" {
 } while (0)
 
 #define	BF64_UVAL(len, v) \
+	((len) == 1  ? (uint64_t)!!(v) : \
 	((len) <= 8  ? (uint64_t)(uint8_t)(v)  : \
 	(len) <= 16 ? (uint64_t)(uint16_t)(v) : \
 	(len) <= 32 ? (uint64_t)(uint32_t)(v) : \
-	(uint64_t)(v))
+	(uint64_t)(v)))
 
 #define	BF64_SET(x, low, len, val) do { \
 	uint64_t __v = BF64_UVAL((len), (val)); \
