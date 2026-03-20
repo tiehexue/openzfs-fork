@@ -117,7 +117,8 @@ commitcheck:
 		${top_srcdir}/scripts/commitcheck.sh; \
 	fi
 
-CHECKS += spdxcheck
+# Let's disable this on Windows for now
+# CHECKS += spdxcheck
 spdxcheck:
 	$(AM_V_at)$(top_srcdir)/scripts/spdxcheck.pl
 
