@@ -48,4 +48,8 @@ cp drivers/OpenZFS/OpenZVOL.sys out/build/x64-Debug/module/os/windows/zvol/drive
 cp drivers/OpenZFS/OpenZVOL.cat out/build/x64-Debug/module/os/windows/zvol/driver/
 cp drivers/OpenZFS/OpenZVOL.Inf out/build/x64-Debug/module/os/windows/zvol/driver/
 
+echo "Populating symstore ... "
+contrib/windows/symstore.sh
+
+echo ""
 echo "Now run Inno Setup to produce installer"
