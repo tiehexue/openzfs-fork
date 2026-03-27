@@ -128,6 +128,10 @@ static PDRIVER_OBJECT StopUnload_DriverObject = NULL;
 static HANDLE g_PinHandle = NULL;
 extern pHW_HBA_EXT STOR_HBAExt;
 
+// Only if we call DEREGISTER should we delete the
+// devices. If PnpMgr is doing it, we should not.
+static uint64_t Deregister_Unload = 0ULL;
+
 boolean_t Storport_Unloaded = FALSE;
 
 extern int zvol_start(PDRIVER_OBJECT DriverObject,
@@ -304,6 +308,8 @@ ControlDeviceIoctlHandler(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 			ObDereferenceObject(DeviceObject);
 			UnpinMyAdapter();
 
+			atomic_inc_64(&Deregister_Unload);
+
 			OpenZVOLUnloadRoutine(OpenZVOL_DriverObject);
 		}
 		status = STATUS_SUCCESS;
@@ -418,12 +424,14 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 	IoDeleteSymbolicLink(&symbolicLinkName);
 	IoDeleteSymbolicLink(&symbolicLinkName2);
 
-	if (StopUnload_DriverObject)
-		IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
-	StopUnload_DriverObject = NULL;
-	if (OpenZVOL_DriverObject)
-		IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
-	OpenZVOL_DriverObject = NULL;
+	if (Deregister_Unload == 1ULL) {
+		if (StopUnload_DriverObject)
+			IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
+		StopUnload_DriverObject = NULL;
+		if (OpenZVOL_DriverObject)
+			IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
+		OpenZVOL_DriverObject = NULL;
+	}
 
 	finiDbgCircularBuffer();
 }
