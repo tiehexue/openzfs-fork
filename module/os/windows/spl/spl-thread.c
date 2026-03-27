@@ -54,43 +54,46 @@ spl_thread_create(
     pri_t	pri)
 {
 	NTSTATUS result;
-	struct _KTHREAD *thread;
 
 #ifdef SPL_DEBUG_THREAD
 	dprintf("Start thread pri %d by '%s':%d\n", pri,
 	    filename, line);
 #endif
+	HANDLE hThread = NULL;
+	PETHREAD eThread = NULL;
+
 	result = PsCreateSystemThread(
-	    (void **)&thread,
-	    0,    // DesiredAccess,
-	    NULL, // ObjectAttributes,
-	    NULL, // ProcessHandle,
-	    0,    // ClientId,
-	    proc, // StartRoutine,
-	    arg); // StartContext
+	    &hThread,
+	    0,
+	    NULL,
+	    NULL,
+	    NULL,
+	    proc,
+	    arg);
 
-	if (result != STATUS_SUCCESS)
+	if (!NT_SUCCESS(result))
 		return (NULL);
-
-	/*
-	 * Improve the priority when asked to do so
-	 * Thread priorities range from 0 to 31, where 0 is the lowest
-	 * priority and 31 is the highest
-	 */
 
 	atomic_inc_64(&zfs_threads);
 
-	// Convert thread handle to pethread, so it matches current_thread()
-	PETHREAD eThread;
-	ObReferenceObjectByHandle(thread, THREAD_ALL_ACCESS, 0,
-	    KernelMode, (void **)&eThread, 0);
+	result = ObReferenceObjectByHandle(
+	    hThread,
+	    0,
+	    *PsThreadType,
+	    KernelMode,
+	    (PVOID *)&eThread,
+	    NULL);
 
-	if (pri >= wtqclsyspri) {
-		KeSetPriorityThread(eThread, pri);
+	if (!NT_SUCCESS(result)) {
+		ZwClose(hThread);
+		return (NULL);
 	}
 
+	if (pri >= wtqclsyspri)
+		KeSetPriorityThread((PKTHREAD)eThread, pri);
+
 	ObDereferenceObject(eThread);
-	ZwClose(thread);
+	ZwClose(hThread);
 	return ((kthread_t *)eThread);
 }
 
