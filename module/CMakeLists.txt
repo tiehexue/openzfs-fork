@@ -171,13 +171,26 @@ function(um_add_executable name)
 endfunction()
 
 function(tracewpp OUTPUT_DIR SOURCE)
+
+	if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86")
+		set(WDK_HOST_PLATFORM "x86")
+	elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
+		set(WDK_HOST_PLATFORM "x64")
+	elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+		set(WDK_HOST_PLATFORM "arm64")
+	endif()
+
+	message(STATUS "Looking for tracewpp in ${WDK_ROOT}/bin/${WDK_VERSION}/${WDK_HOST_PLATFORM}")
+
 	find_program(TRACEWPP_PROGRAM
 		tracewpp
 		HINTS
-			"${WDK_ROOT}/bin/${WDK_VERSION}/${WDK_PLATFORM}"
-			"$ENV{WINSDK_NUGET_ROOT}/bin/${WDK_VERSION}/${WDK_PLATFORM}"
+			"${WDK_ROOT}/bin/${WDK_VERSION}/${WDK_HOST_PLATFORM}"
+			"$ENV{WINSDK_NUGET_ROOT}/bin/${WDK_VERSION}/${WDK_HOST_PLATFORM}"
 		NO_DEFAULT_PATH
 	)
+
+	message(STATUS " tracewpp.exe found at ${TRACEWPP_PROGRAM}")
 
 	if (NOT TRACEWPP_PROGRAM)
 		message(FATAL_ERROR "Failed to find tracewpp.exe")

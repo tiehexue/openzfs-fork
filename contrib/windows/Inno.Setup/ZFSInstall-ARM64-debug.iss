@@ -30,7 +30,7 @@
 ; Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
 AppId={{61A38ED1-4D3F-4869-A8D5-87A58A301D56}
-AppName={#MyAppName}-ARM64-debug
+AppName={#MyAppName}-debug
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName}-{#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -42,7 +42,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 LicenseFile={#SourcePath}\OPENSOLARIS.LICENSE.txt
 InfoBeforeFile={#SourcePath}\readme.txt
-OutputBaseFilename=OpenZFSOnWindows-ARM64-debug-{#MyAppVersion}
+OutputBaseFilename=OpenZFSOnWindows-debug-{#MyAppVersion}
 SetupIconFile={#SourcePath}\openzfs.ico
 Compression=lzma
 SolidCompression=yes
@@ -58,18 +58,36 @@ WizardImageFile="{#SourcePath}\openzfs-large.bmp"
 ; SignTool=signtoola
 ; SignTool=signtoolb
 SignTool=signtoolc
-ArchitecturesInstallIn64BitMode=arm64
-ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64compatible
 SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Code]
-procedure CurStepChanged(CurStep: TSetupStep);
+function ExecHiddenWait(const FileName, Params, WorkingDir: string; var ExitCode: Integer): Boolean;
 begin
-    if (CurStep = ssPostInstall) and WizardIsTaskSelected('envPath')
-    then EnvAddPath(ExpandConstant('{app}'));
+  // SW_HIDE or SW_SHOW
+  Result := Exec(FileName, Params, WorkingDir, SW_SHOW, ewWaitUntilTerminated, ExitCode);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var ExePath: string; Code: Integer; Ok: Boolean;
+begin
+    if (CurStep = ssPostInstall) then
+    begin
+      if (WizardIsTaskSelected('envPath')) then
+      begin
+        EnvAddPath(ExpandConstant('{app}'));
+      end;
+    
+      ExePath := ExpandConstant('{app}\zfsinstaller.exe');
+      if FileExists(ExePath) then
+      begin
+        Ok := ExecHiddenWait(ExePath, 'postflight', '', Code);
+      end;
+    end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -78,56 +96,151 @@ begin
     then EnvRemovePath(ExpandConstant('{app}'));
 end;
 
+function RunPreflightAndFailIfNeeded(): Boolean;
+var
+  ExePath: string;
+  ResultCode: Integer;
+  Ok: Boolean;
+begin
+  // Make the bundled exe available in {tmp}
+  ExtractTemporaryFile('zfsinstaller.exe');
+  ExePath := ExpandConstant('{tmp}\zfsinstaller.exe');
+
+  // Optional: add args like "preflight --attempt-export --quiet"
+  // SW_HIDE or SW_SHOW
+  Ok := Exec(ExePath, 'preflight', '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
+  if not Ok then
+  begin
+    SuppressibleMsgBox(
+      'Failed to run preflight (zfsinstaller.exe). Installation cannot continue.',
+      mbCriticalError, MB_OK, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  // Your preflight contract:
+  //  0  = OK to proceed (no pools, or successfully exported)
+  // !=0 = Pools are imported and could not be auto-exported (user action needed)
+  if ResultCode <> 0 then
+  begin
+    // Keep this message crisp; users will see it right before install begins
+    SuppressibleMsgBox(
+      'OpenZFS preflight check detected imported pools.'#13#10+
+      'Please export all pools (e.g. "zpool export -a") and run the installer again.',
+      mbCriticalError, MB_OK, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  Result := True;
+end;
+
+// Called right before files are installed. Return a non-empty string to abort.
+function PrepareToInstall(var NeedsRestart: Boolean): string;
+begin
+  if not RunPreflightAndFailIfNeeded() then
+    Result := 'Preflight checks failed. Pools are still imported.'
+  else
+    Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+var ExePath: string; Code: Integer; Ok: Boolean;
+begin
+  Result := True;  // default allow
+  ExePath := ExpandConstant('{app}\zfsinstaller.exe');
+
+  if FileExists(ExePath) then
+  begin
+    Ok := ExecHiddenWait(ExePath, 'preflight', '', Code);
+    if not Ok then
+    begin
+      SuppressibleMsgBox('Failed to run pre-uninstall preflight (zfsinstaller.exe).', mbCriticalError, MB_OK, MB_OK);
+      Result := False; Exit;
+    end;
+
+    if Code <> 0 then
+    begin
+      SuppressibleMsgBox(
+        'Uninstall preflight detected imported pools or couldn’t safely export them.'#13#10+
+        'Please export all pools (e.g. "zpool export -a") and retry uninstall.',
+        mbCriticalError, MB_OK, MB_OK);
+      Result := False; Exit;
+    end;
+  end;
+end;
+
+
 [Tasks]
 Name: envPath; Description: "Add OpenZFS to PATH variable"
 
 [Files]
 Source: "{#Root}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\CODE_OF_CONDUCT.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\os\windows/kstat/kstat.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\os\windows/zfsinstaller/zfsinstaller.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zpool\zpool.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zfs\zfs.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zdb\zdb.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zed\zed.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zstream\zstreamdump.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\raidz_test\raidz_test.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\driver\OpenZFS.sys"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\driver\OpenZFS.cat"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\driver\OpenZFS.inf"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\driver\OpenZFS.man"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\kstat\kstat.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\zfsinstaller\zfsinstaller.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\zed_service\zed_service.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\zfs_tray\zfs_tray.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zpool\zpool.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zfs\zfs.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zdb\zdb.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zed\zed.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zstream\zstreamdump.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\raidz_test\raidz_test.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\driver\OpenZFS.sys"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\driver\OpenZFS.cat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\driver\OpenZFS.inf"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\driver\OpenZFS.man"; DestDir: "{app}"; Flags: ignoreversion
 ;Source: "{#Root}\x64\Debug\ZFSin.cer"; DestDir: "{app}"; Flags: ignoreversion
 ;Source: "{#Root}\zfs\cmd\arcstat\arcstat.pl"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\driver\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zstream\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zpool\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zfs\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zdb\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\zed\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\raidz_test\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\os\windows\zfsinstaller\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\cmd\os\windows\kstat\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\driver\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zstream\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zpool\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zfs\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zdb\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\zed\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\raidz_test\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\zfsinstaller\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\cmd\os\windows\kstat\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
 Source: "{#SourcePath}\HowToDebug.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\contrib\windows\parsedump\*.*"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\contrib\windows\EnableOpenZFSLocalCrashDumps.reg"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\contrib\windows\DisableOpenZFSLocalCrashDumps.reg"; DestDir: "{app}\symbols"; Flags: ignoreversion
 Source: "{#Root}\scripts\zfs_prepare_disk"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\cmd\zpool\compatibility.d\*"; DestDir: "{app}\compatibility.d"; Flags: ignoreversion
 Source: "{#Root}\cmd\zpool\zpool.d\*"; DestDir: "{app}\zpool.d"; Flags: ignoreversion
 Source: "{#Root}\cmd\zed\os\windows\zed.d\*"; DestDir: "{app}\zed.d"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\zvol\driver\OpenZVOL.sys"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\zvol\driver\OpenZVOL.cat"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\zvol\driver\OpenZVOL.inf"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\out\build\arm64-Debug\module\os\windows\zvol\driver\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.sys"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.cat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.inf"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\out\build\x64-Debug\module\os\windows\zvol\driver\*.pdb"; DestDir: "{app}\symbols"; Flags: ignoreversion
 
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
+[UninstallDelete]
+Type: files; Name: "{app}\zed.pid"
+Type: files; Name: "{app}\zed.state"
+Type: files; Name: "{app}\cbuf.txt"
 
 [Icons]
 Name: "{group}\{cm:ProgramOnTheWeb,{#MyAppName}}"; Filename: "{#MyAppURL}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+Name: "{commonstartup}\OpenZFS Tray"; Filename: "{app}\zfs_tray.exe"
+
 
 [Run]
 Filename: "{app}\ZFSInstaller.exe"; Parameters: "install -z .\OpenZFS.inf .\OpenZVOL.inf"; StatusMsg: "Installing Driver..."; Flags: runascurrentuser;
+; zfs_tray bit next
+Filename: "sc.exe"; Parameters: "create OpenZFS_Tray binPath= ""{app}\zed_service.exe"" start= auto DisplayName= ""OpenZFS Tray"""; Flags: runhidden waituntilterminated
+Filename: "sc.exe"; Parameters: "start OpenZFS_Tray"; Flags: runhidden
+Filename: "{app}\zfs_tray.exe"; Flags: postinstall nowait runasoriginaluser
+
 
 [UninstallRun]
+; First zfs_tray
+Filename: "taskkill.exe"; Parameters: "/IM zfs_tray.exe /T /F"; RunOnceId: "stoptray"; Flags: runhidden
+Filename: "sc.exe"; Parameters: "stop OpenZFS_Tray"; RunOnceId: "stoptrayservice"; Flags: runhidden waituntilterminated
+Filename: "sc.exe"; Parameters: "delete OpenZFS_Tray"; RunOnceId: "deletetrayservice"; Flags: runhidden waituntilterminated
+; Kernel
 Filename: "{app}\ZFSInstaller.exe"; Parameters: "uninstall -z .\OpenZFS.inf .\OpenZVOL.inf"; RunOnceId: "driver"; Flags: runascurrentuser;
 
 [Registry]
