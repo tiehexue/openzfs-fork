@@ -334,7 +334,8 @@ zvol_os_register_module(void)
 	    "zvol_os_wait_openzvol_thead_lock", MUTEX_DEFAULT, NULL);
 	(void) cv_init(&zvol_os_wait_openzvol_thread_cv, NULL, CV_DEFAULT,
 	    NULL);
-	(void) thread_create(NULL, 0, zvol_os_wait_openzvol, 0, 0, 0, 0, 92);
+	(void) thread_create(NULL, 0, zvol_os_wait_openzvol, 0, 0, 0, 0,
+	    defclsyspri);
 
 	return (0);
 }

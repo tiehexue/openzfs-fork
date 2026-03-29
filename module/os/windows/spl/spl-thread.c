@@ -89,8 +89,23 @@ spl_thread_create(
 		return (NULL);
 	}
 
+	if (pri > wtqclsyspri) {
+		dprintf("Set thread attempted priority %d -- clamped\n", pri);
+		pri = defclsyspri;
+	}
+
 	if (pri >= wtqclsyspri)
 		KeSetPriorityThread((PKTHREAD)eThread, pri);
+
+	/*
+	 * Pin thread to processor group 0 to avoid cross-group
+	 * scheduling bugs on unpatched multi-group systems
+	 */
+	GROUP_AFFINITY groupAffinity = { 0 };
+	groupAffinity.Group = 0;
+	groupAffinity.Mask = (KAFFINITY)(-1);  /* all CPUs in group 0 */
+	ZwSetInformationThread(hThread, ThreadGroupInformation,
+	    &groupAffinity, sizeof (groupAffinity));
 
 	ObDereferenceObject(eThread);
 	ZwClose(hThread);
