@@ -34,7 +34,7 @@
 		IRP *irp; \
 		void *b_addr; \
 		IO_STATUS_BLOCK IoStatus; \
-		boolean_t completion_called; \
+		volatile uint32_t completion_called; \
 		PIO_WORKITEM work_item; \
 	} windows;
 
