@@ -6352,9 +6352,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		Status = GetExceptionCode();
 	}
 
-	if (!locked)
-		MmUnlockPages(Irp->MdlAddress);
-
 	if (!NT_SUCCESS(Status)) {
 		dprintf("zfs_write returned %08lx\n", Status);
 		goto end;
