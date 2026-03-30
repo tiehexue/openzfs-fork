@@ -361,6 +361,7 @@
     <elf-symbol name='zfs_crypto_create' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zfs_crypto_get_encryption_root' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zfs_crypto_load_key' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='zfs_crypto_load_key_direct' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zfs_crypto_rewrap' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zfs_crypto_unload_key' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zfs_dataset_exists' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -2316,9 +2317,8 @@
       <enumerator name='ZFS_PROP_DEFAULTPROJECTOBJQUOTA' value='105'/>
       <enumerator name='ZFS_PROP_MIMIC' value='106'/>
       <enumerator name='ZFS_PROP_DRIVELETTER' value='107'/>
-      <enumerator name='ZFS_NUM_PROPS' value='108'/>
-      <enumerator name='ZFS_PROP_SNAPSHOTS_CHANGED_NSECS' value='109'/>
-      <enumerator name='ZFS_NUM_PROPS' value='110'/>
+      <enumerator name='ZFS_PROP_SNAPSHOTS_CHANGED_NSECS' value='108'/>
+      <enumerator name='ZFS_NUM_PROPS' value='109'/>
     </enum-decl>
     <typedef-decl name='zfs_prop_t' type-id='4b000d60' id='58603c44'/>
     <enum-decl name='zprop_source_t' naming-typedef-id='a2256d42' id='5903f80e'>
@@ -4019,6 +4019,13 @@
       <parameter type-id='9200a744' name='zhp'/>
       <parameter type-id='c19b74c3' name='noop'/>
       <parameter type-id='80f4b756' name='alt_keylocation'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='zfs_crypto_load_key_direct' mangled-name='zfs_crypto_load_key_direct' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='zfs_crypto_load_key_direct'>
+      <parameter type-id='9200a744' name='zhp'/>
+      <parameter type-id='c19b74c3' name='noop'/>
+      <parameter type-id='80f4b756' name='pass'/>
+      <parameter type-id='7359adad' name='passlen'/>
       <return type-id='95e97e5e'/>
     </function-decl>
     <function-decl name='zfs_crypto_unload_key' mangled-name='zfs_crypto_unload_key' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='zfs_crypto_unload_key'>
