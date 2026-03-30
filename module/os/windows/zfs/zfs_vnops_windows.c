@@ -5241,15 +5241,13 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 	if (zccb->dir_eof)
 		return (STATUS_NO_MORE_FILES);
 
-	struct iovec iov;
 	void *SystemBuffer = MapUserBuffer(Irp,
 	    IrpSp->Parameters.QueryDirectory.Length, IoWriteAccess, &mdl);
-	iov.iov_base = (void *)SystemBuffer;
-	iov.iov_len = IrpSp->Parameters.QueryDirectory.Length;
 
-	zfs_uio_t uio;
-	zfs_uio_iovec_init(&uio, &iov, 1, zccb->dirlist_index, UIO_SYSSPACE,
-	    IrpSp->Parameters.QueryDirectory.Length, 0);
+	if (SystemBuffer == NULL) {
+		UnMapUserBuffer(mdl);
+		return (STATUS_INSUFFICIENT_RESOURCES);
+	}
 
 	// Grab the root zp
 	zmo = DeviceObject->DeviceExtension;
@@ -5337,8 +5335,8 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 	}
 
 	emitdir_ptr_t ctx;
-	ctx.bufsize = (size_t)zfs_uio_resid(&uio);
-	ctx.alloc_buf = kmem_zalloc(ctx.bufsize, KM_SLEEP);
+	ctx.bufsize = IrpSp->Parameters.QueryDirectory.Length;
+	ctx.alloc_buf = SystemBuffer;
 	ctx.bufptr = ctx.alloc_buf;
 	ctx.outcount = 0;
 	ctx.next_offset = NULL;
@@ -5372,14 +5370,10 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 
 	if (ret == 0) {
 		if (ctx.outcount > 0) {
-
-			if ((ret = zfs_uiomove(ctx.alloc_buf,
-			    (long)ctx.outcount, UIO_READ, &uio))) {
-				/*
-				 * Reset the pointer, by copying in old value
-				 */
-				ctx.offset = zccb->dirlist_index;
-			}
+			/*
+			 * Data was written directly into SystemBuffer —
+			 * no intermediate copy needed.
+			 */
 			Status = STATUS_SUCCESS;
 		} else { // outcount == 0
 			Status = initial ?
@@ -5388,8 +5382,6 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 		}
 		// Set correct buffer size returned.
 		Irp->IoStatus.Information = ctx.outcount;
-		//    IrpSp->Parameters.QueryDirectory.Length -
-		//    zfs_uio_resid(&uio);
 
 		dprintf("dirlist information in %ld out size %llu\n",
 		    IrpSp->Parameters.QueryDirectory.Length,
@@ -5398,8 +5390,6 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 		// Remember directory index for next time
 		zccb->dirlist_index = ctx.offset;
 	}
-
-	kmem_free(ctx.alloc_buf, ctx.bufsize);
 
 	UnMapUserBuffer(mdl);
 
