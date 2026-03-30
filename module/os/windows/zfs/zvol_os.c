@@ -149,7 +149,8 @@ register_with_openzvol(void)
 	IO_STATUS_BLOCK iosb;
 	zvol_api_t *api;
 
-	api = ExAllocatePool(NonPagedPool, sizeof (zvol_api_t));
+	api = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof (zvol_api_t),
+	    'lovZ');
 	if (!api) {
 		dprintf("ZFS: Failed to allocate memory\n");
 		goto out;

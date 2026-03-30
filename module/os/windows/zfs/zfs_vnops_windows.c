@@ -668,20 +668,20 @@ dump_sd(PSECURITY_DESCRIPTOR sd)
 		if (status == STATUS_BUFFER_TOO_SMALL) {
 			// Allocate memory for absolute SD and associated
 			// components
-			absoluteSD = ExAllocatePoolWithTag(NonPagedPool,
+			absoluteSD = ExAllocatePoolWithTag(NonPagedPoolNx,
 			    sdSize, 'SDAB');
 			if (!absoluteSD) {
 				dprintf("Failed to allocate memory\n");
 				return;
 			}
 
-			dacl = ExAllocatePoolWithTag(NonPagedPool, daclSize,
+			dacl = ExAllocatePoolWithTag(NonPagedPoolNx, daclSize,
 			    'DACL');
-			sacl = ExAllocatePoolWithTag(NonPagedPool, saclSize,
+			sacl = ExAllocatePoolWithTag(NonPagedPoolNx, saclSize,
 			    'SACL');
-			owner = ExAllocatePoolWithTag(NonPagedPool, ownerSize,
+			owner = ExAllocatePoolWithTag(NonPagedPoolNx, ownerSize,
 			    'OWNR');
-			primaryGroup = ExAllocatePoolWithTag(NonPagedPool,
+			primaryGroup = ExAllocatePoolWithTag(NonPagedPoolNx,
 			    primaryGroupSize, 'PGRP');
 
 			if (!dacl || !sacl || !owner || !primaryGroup) {
@@ -935,7 +935,7 @@ ZfsOplockCreatePostBreak(_In_ PVOID Context, _In_ PIRP Irp)
 
 	ctx->WorkItem = IoAllocateWorkItem(ctx->DeviceObject);
 	if (!ctx->WorkItem) {
-		// Fail the IRP if we can’t resume safely
+		// Fail the IRP if we canï¿½t resume safely
 		Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
 		Irp->IoStatus.Information = 0;
 		// FsRtlCompleteRequest(Irp, Irp->IoStatus.Status);
@@ -3315,7 +3315,7 @@ lock_control(PDEVICE_OBJECT DeviceObject, PIRP *PIrp, PIO_STACK_LOCATION IrpSp)
 	switch (IrpSp->MinorFunction) {
 	case IRP_MN_LOCK: {
 
-		// If we’re re-entering from our work item (resume),
+		// If weï¿½re re-entering from our work item (resume),
 		// skip the preflight
 		const BOOLEAN skipPreflight =
 		    (skip == (OPLOCK_SKIP_MAGIC | OPLOCK_SKIP_LOCK));
