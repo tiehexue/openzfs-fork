@@ -45,9 +45,12 @@ static intptr_t stack_remaining(void) {
   return local;
 }
 #elif defined (_KERNEL) && defined(_WIN32)
-#pragma warning "stack_remaining not implemented"
 static intptr_t stack_remaining(void) {
-  return INT_MAX;
+  ULONG_PTR low, high;
+  intptr_t local;
+  IoGetStackLimits(&low, &high);
+  local = (intptr_t)&local;
+  return (local - (intptr_t)low);
 }
 #else
 static intptr_t stack_remaining(void) {
