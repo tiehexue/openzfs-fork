@@ -77,6 +77,7 @@ add_compile_options(
 	-Wno-unused-label
 	#Visual Studio 2022 update 2022114 started breaking builds with errors
 	-Wno-int-conversion
+	-Wunknown-pragmas
 )
 
 add_compile_options(/Zi /Od /Oy- /Zo /Ob0)

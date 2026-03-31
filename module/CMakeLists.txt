@@ -58,8 +58,6 @@ if (NOT SIGNTOOL_PROGRAM)
 	message(FATAL_ERROR "Failed to find signtool.exe")
 endif()
 
-message(STATUS "SIGNTOOL set to ${SIGNTOOL_PROGRAM}")
-
 find_program(STAMPINF_PROGRAM
 	stampinf
 	PATHS "${WDK_ROOT}/bin/${WDK_VERSION}/${WDK_PLATFORM}"
@@ -93,9 +91,6 @@ list(APPEND WDK_COMPILE_FLAGS
 #list(APPEND WDK_LINK_FLAGS
 #	/DEBUG
 #)
-
-message(STATUS "WDK_COMPILE_FLAGS is now ${WDK_COMPILE_FLAGS}")
-
 
 set(CMAKE_C_STANDARD_LIBRARIES "")
 
@@ -150,9 +145,6 @@ add_compile_options(
 	$<$<AND:$<CONFIG:RelWithDebInfo>,$<NOT:$<BOOL:$<TARGET_PROPERTY:WDK_TARGET>>>>:${CRT_FLAG_RELWITHDEBINFO}>
 )
 
-message(STATUS "CRT_FLAG_DEBUG is now ${CRT_FLAG_DEBUG}")
-
-
 function(um_add_executable name)
 	add_executable(${ARGV})
 
@@ -180,8 +172,6 @@ function(tracewpp OUTPUT_DIR SOURCE)
 		set(WDK_HOST_PLATFORM "arm64")
 	endif()
 
-	message(STATUS "Looking for tracewpp in ${WDK_ROOT}/bin/${WDK_VERSION}/${WDK_HOST_PLATFORM}")
-
 	find_program(TRACEWPP_PROGRAM
 		tracewpp
 		HINTS
@@ -189,8 +179,6 @@ function(tracewpp OUTPUT_DIR SOURCE)
 			"$ENV{WINSDK_NUGET_ROOT}/bin/${WDK_VERSION}/${WDK_HOST_PLATFORM}"
 		NO_DEFAULT_PATH
 	)
-
-	message(STATUS " tracewpp.exe found at ${TRACEWPP_PROGRAM}")
 
 	if (NOT TRACEWPP_PROGRAM)
 		message(FATAL_ERROR "Failed to find tracewpp.exe")
@@ -207,8 +195,6 @@ function(tracewpp OUTPUT_DIR SOURCE)
 	if (NOT EXISTS "${SCAN}")
 		message(FATAL_ERROR "Failed to find wdftraceenums.h")
 	endif()
-
-	message(STATUS "WDF trace enums: ${SCAN}")
 
 	get_filename_component(FILEN ${SOURCE} NAME)
 	set(TMH_FILEN ${FILEN}.tmh)
