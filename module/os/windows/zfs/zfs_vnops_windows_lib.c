@@ -63,6 +63,58 @@
 
 #undef _NTDDK_
 
+/*
+ * Translate a POSIX errno returned by a ZFS vop into the NTSTATUS code
+ * that best represents the same condition to Windows callers.  Callers
+ * that need context-specific overrides (e.g. IRP_MJ_CREATE distinguishing
+ * FILE_EXISTS vs FILE_DOES_NOT_EXIST) should handle those cases before or
+ * after calling this helper.
+ */
+NTSTATUS
+zfs_error_to_ntstatus(int error)
+{
+	switch (error) {
+	case EPERM:
+	case EACCES:
+		return (STATUS_ACCESS_DENIED);
+	case ENOENT:
+		return (STATUS_OBJECT_NAME_NOT_FOUND);
+	case EEXIST:
+		return (STATUS_OBJECT_NAME_COLLISION);
+	case EXDEV:
+		return (STATUS_NOT_SAME_DEVICE);
+	case ENOTDIR:
+		return (STATUS_NOT_A_DIRECTORY);
+	case EISDIR:
+		return (STATUS_FILE_IS_A_DIRECTORY);
+	case ENOTEMPTY:
+		return (STATUS_DIRECTORY_NOT_EMPTY);
+	case ENAMETOOLONG:
+		return (STATUS_OBJECT_NAME_INVALID);
+	case ENOSPC:
+	case EDQUOT:
+		return (STATUS_DISK_FULL);
+	case EROFS:
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+	case EINVAL:
+		return (STATUS_INVALID_PARAMETER);
+	case ENOMEM:
+		return (STATUS_INSUFFICIENT_RESOURCES);
+	case ENOTSUP:
+	case EOPNOTSUPP:
+		return (STATUS_NOT_SUPPORTED);
+	case EBUSY:
+		return (STATUS_DEVICE_BUSY);
+	case EMLINK:
+		return (STATUS_TOO_MANY_LINKS);
+	case ERANGE:
+	case EOVERFLOW:
+		return (STATUS_BUFFER_OVERFLOW);
+	default:
+		return (error);
+	}
+}
+
 uint64_t windows_load_security = 1;
 ZFS_MODULE_PARAM(, windows_, load_security, U64, ZMOD_RW,
 	"Windows: load Security Descriptors from storage");
@@ -3924,6 +3976,7 @@ set_file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	FILE_OBJECT *RootFileObject = NULL;
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	struct vnode *fvp = FileObject->FsContext;
+	zfs_ccb_t *fccb = FileObject->FsContext2;
 	znode_t *zp = VTOZ(fvp);
 	znode_t *dzp = NULL;
 	int error;
@@ -3986,7 +4039,7 @@ set_file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		filename = &filename[6];
 
 	error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder, &tdvp,
-	    &tvp, 0, 0);
+	    &tvp, 0, 0, fccb != NULL ? &fccb->cred : NULL);
 	if (error) {
 		if (RootFileObject)
 			ObDereferenceObject(RootFileObject);
@@ -4037,11 +4090,7 @@ set_file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 #endif
 	}
 
-	switch (error) {
-	case EEXIST:
-		error = STATUS_ACCESS_DENIED;
-		break;
-	}
+	error = zfs_error_to_ntstatus(error);
 
 	// Release all holds
 out:
@@ -4198,7 +4247,7 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		VN_HOLD(tdvp);
 
 		error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder,
-		    &tdvp, &tvp, 0, 0);
+		    &tdvp, &tvp, 0, 0, &fccb->cred);
 
 		dFileObject = NULL; // Dont ObDereference later
 
@@ -4269,7 +4318,7 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			filename = tail;
 
 		error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder,
-		    &tdvp, &tvp, 0, 0);
+		    &tdvp, &tvp, 0, 0, &fccb->cred);
 		if (error) {
 			Status = STATUS_OBJECTID_NOT_FOUND;
 			tdvp = NULL; // did not hold, dont rele
@@ -4312,11 +4361,19 @@ set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		VERIFY0(VN_HOLD(tdvp));
 	}
 
+	/*
+	 * The IO Manager verifies the FileObject has DELETE access before
+	 * dispatching FileRenameInformation, so if we are here Windows has
+	 * already performed the access check. Skip the redundant POSIX ACL
+	 * check in zfs_rename so non-admin users can rename files/dirs that
+	 * Windows has granted them permission to rename.
+	 */
 	error = zfs_rename(VTOZ(fdvp), &fccb->z_name_cache[fccb->z_name_offset],
-	    VTOZ(tdvp), remainder ? remainder : filename, NULL, 0, 0, NULL,
-	    NULL);
+	    VTOZ(tdvp), remainder ? remainder : filename, &fccb->cred,
+	    FBYPASS_ZFS_ACL, 0, NULL, NULL);
+	error = zfs_error_to_ntstatus(error);
 
-	if (error == 0) {
+	if (error == STATUS_SUCCESS) {
 
 		// rename file in same directory:
 		// send dir modified, send OLD_NAME, NEW_NAME
@@ -4596,7 +4653,7 @@ get_reparse_tag(znode_t *zp)
 		return (zfsctl_get_reparse_tag(zp));
 
 	int err;
-	REPARSE_DATA_BUFFER tagdata;
+	REPARSE_DATA_BUFFER tagdata = {0};
 	struct iovec iov;
 	iov.iov_base = (void *)&tagdata;
 	iov.iov_len = sizeof (tagdata);
@@ -4605,6 +4662,8 @@ get_reparse_tag(znode_t *zp)
 	zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE,
 	    sizeof (tagdata), 0);
 	err = zfs_readlink(ZTOV(zp), &uio, NULL);
+	if (err != 0)
+		return (0);
 	return (tagdata.ReparseTag);
 }
 
@@ -4998,7 +5057,7 @@ file_alignment_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	fai->AlignmentRequirement = 0; /* FILE_WORD_ALIGNMENT; */
+	fai->AlignmentRequirement = FILE_WORD_ALIGNMENT;
 	return (STATUS_SUCCESS);
 }
 

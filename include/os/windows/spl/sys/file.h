@@ -24,6 +24,11 @@
 
 #define	FIGNORECASE	0x00080000
 #define	FLINKREPLACE	0x00100000 // Windows
+/*
+ * Windows-only: skip ZFS POSIX ACL check in zfs_rename because Windows
+ * already validated DELETE access on the source FileObject at open time.
+ */
+#define	FBYPASS_ZFS_ACL	0x00200000
 #define	FKIOCTL		0x80000000
 #define	FCOPYSTR	0x40000000
 
