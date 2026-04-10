@@ -1019,6 +1019,13 @@ zfs_unload_stage_1(void)
 		DriverExtension->FunctionalDeviceObject = NULL;
 	}
 
+	// Unregister FileSystem
+	if (DriverExtension->fsDiskDeviceObject) {
+		IoUnregisterFileSystem(DriverExtension->fsDiskDeviceObject);
+		IoDeleteDevice(DriverExtension->fsDiskDeviceObject);
+		DriverExtension->fsDiskDeviceObject = NULL;
+	}
+
 	// Remove the ioctl node for userland
 	if (DriverExtension->ioctlDeviceObject) {
 		mutex_enter(&zfsdev_state_lock);
@@ -1043,18 +1050,7 @@ zfs_unload_stage_1(void)
 void
 zfs_unload_stage_2(void)
 {
-	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
-
-	/*
-	 * IoUnregisterFileSystem acquires PiEngineLock internally, so it must
-	 * not be called from IRP_MN_REMOVE_DEVICE dispatch (where PnP already
-	 * holds PiEngineLock). DriverUnload is safe since PnP is done by then.
-	 */
-	if (DriverExtension->fsDiskDeviceObject) {
-		IoUnregisterFileSystem(DriverExtension->fsDiskDeviceObject);
-		IoDeleteDevice(DriverExtension->fsDiskDeviceObject);
-		DriverExtension->fsDiskDeviceObject = NULL;
-	}
+	NTSTATUS Status;
 }
 
 /*
