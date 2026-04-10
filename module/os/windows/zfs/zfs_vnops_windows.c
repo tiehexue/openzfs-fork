@@ -366,7 +366,7 @@ zfs_init_cache(FILE_OBJECT *fo, struct vnode *vp, CC_FILE_SIZES *ccfs)
 void
 zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *fileobject,
     uint64_t size, zfs_ccb_t **ccb, uint64_t alloc, ACCESS_MASK access,
-    char *stream)
+    char *stream, PIRP Irp)
 {
 	zfs_ccb_t *zccb;
 	znode_t *zp = NULL;
@@ -376,6 +376,7 @@ zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *fileobject,
 	if (fileobject->FsContext2 == NULL) {
 		zccb = kmem_zalloc(sizeof (zfs_ccb_t), KM_SLEEP);
 		zccb->magic = ZFS_CCB_MAGIC;
+		spl_fill_cred_from_irp(&zccb->cred, Irp);
 		fileobject->FsContext2 = zccb;
 	} else {
 		zccb = fileobject->FsContext2;
@@ -1098,7 +1099,7 @@ zfs_preflight_oplock_on_open_existing(
 int
 zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
     int finalpartmustnotexist, char **lastname, struct vnode **dvpp,
-    struct vnode **vpp, int flags, ULONG options)
+    struct vnode **vpp, int flags, ULONG options, cred_t *cr)
 {
 	int error = ENOENT;
 	znode_t *zp;
@@ -1162,7 +1163,7 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
 		cn.cn_pnbuf = namebuffer;
 
 		error = zfs_lookup(VTOZ(dvp), namebuffer,
-		    &zp, flags, NULL, &direntflags, &cn);
+		    &zp, flags, cr, &direntflags, &cn);
 
 		// If snapshot dir and we are pretending it is deleted...
 		if (error == 0 && zp->z_vnode != NULL &&
@@ -1311,7 +1312,8 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
     char *filename, xvattr_t *xvap)
 {
 	int error;
-	cred_t *cr = NULL;
+	cred_t cr_buf;
+	cred_t *cr = &cr_buf;
 	char *finalname = NULL;
 	PFILE_OBJECT FileObject;
 	ULONG outlen;
@@ -1354,6 +1356,8 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 
 	if (vfs_isunmount(zmo))
 		return (STATUS_DEVICE_NOT_READY);
+
+	spl_fill_cred_from_irp(cr, Irp);
 
 	FileObject = IrpSp->FileObject;
 	Options = IrpSp->Parameters.Create.Options;
@@ -1476,7 +1480,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 
 		zfs_couplefileobject(dvp, NULL, FileObject, 0ULL, &zccb,
 		    Irp->Overlay.AllocationSize.QuadPart, DesiredAccess,
-		    stream_name);
+		    stream_name, Irp);
 
 		VN_RELE(dvp);
 
@@ -1552,7 +1556,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 					    Irp->
 					    Overlay.AllocationSize.QuadPart,
 					    DesiredAccess,
-					    stream_name);
+					    stream_name, Irp);
 					VN_RELE(vp);
 
 					Irp->IoStatus.Information = FILE_OPENED;
@@ -1591,7 +1595,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 				    0ULL, &zccb,
 				    Irp->Overlay.AllocationSize.QuadPart,
 				    DesiredAccess,
-				    stream_name);
+				    stream_name, Irp);
 				VN_RELE(dvp);
 			} else {
 				Irp->IoStatus.Information = 0;
@@ -1654,7 +1658,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			error = zfs_find_dvp_vp(zfsvfs, filename,
 			    (CreateFile || OpenTargetDirectory),
 			    (CreateDisposition == FILE_CREATE),
-			    &finalname, &dvp, &vp, flags, Options);
+			    &finalname, &dvp, &vp, flags, Options, cr);
 
 		}
 
@@ -1735,7 +1739,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 				    &zccb,
 				    Irp->Overlay.AllocationSize.QuadPart,
 				    DesiredAccess,
-				    stream_name);
+				    stream_name, Irp);
 			}
 #endif
 			VN_RELE(vp);
@@ -1853,7 +1857,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			    &zccb,
 			    Irp->Overlay.AllocationSize.QuadPart,
 			    DesiredAccess,
-			    stream_name);
+			    stream_name, Irp);
 			if (DeleteOnClose)
 				Status = zfs_setunlink_masked(FileObject, NULL);
 			if (Status == STATUS_SUCCESS)
@@ -1985,9 +1989,49 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		vap->va_mode |= S_IFDIR;
 		vap->va_mask |= (ATTR_MODE | ATTR_TYPE);
 
-		// Set UID,GID if passed in.
+		/* Set UID,GID from IRP security context for new dir ownership */
 		zfs_security_context_pre(vap,
 		    IrpSp->Parameters.Create.SecurityContext);
+
+		/*
+		 * Use SeAccessCheck on the parent's Windows SD as the
+		 * authoritative access check for creates.  The ZFS POSIX ACL
+		 * reflects Unix permissions that may not match Windows volume
+		 * root expectations (e.g. $RECYCLE.BIN on a root-owned pool).
+		 * When SeAccessCheck grants access, pass a uid=0 cred so the
+		 * ZFS POSIX ACL check inside zfs_mkdir succeeds regardless of
+		 * parent ownership.  Ownership of the new object comes from
+		 * vap->va_uid set above by zfs_security_context_pre.
+		 */
+		cred_t elevated_mkdir_cr = { .cr_uid = 0, .cr_gid = 0 };
+		cred_t *mkdir_cr = cr;
+		PSECURITY_DESCRIPTOR parentSD = vnode_security(dvp);
+		if (parentSD != NULL) {
+			ACCESS_MASK grantedAccess;
+			NTSTATUS accessStatus;
+			PIO_SECURITY_CONTEXT sc =
+			    IrpSp->Parameters.Create.SecurityContext;
+			SeLockSubjectContext(
+			    &sc->AccessState->SubjectSecurityContext);
+			BOOLEAN winOK = SeAccessCheck(parentSD,
+			    &sc->AccessState->SubjectSecurityContext,
+			    TRUE, FILE_ADD_SUBDIRECTORY, 0, NULL,
+			    IoGetFileObjectGenericMapping(),
+			    IrpSp->Flags & SL_FORCE_ACCESS_CHECK ?
+			    UserMode : Irp->RequestorMode,
+			    &grantedAccess, &accessStatus);
+			SeUnlockSubjectContext(
+			    &sc->AccessState->SubjectSecurityContext);
+			if (!winOK) {
+				dprintf("%s: SeAccessCheck denied mkdir\n",
+				    __func__);
+				if (vp != NULL)
+					VN_RELE(vp);
+				VN_RELE(dvp);
+				return (accessStatus);
+			}
+			mkdir_cr = &elevated_mkdir_cr;
+		}
 
 		/* If parent is CaseSensitive, sub-Dir should be too */
 		if (VTOZ(dvp)->z_pflags & ZFS_CASESENSITIVEDIR) {
@@ -1997,7 +2041,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			XVA_SET_REQ(xvap, XAT_CASESENSITIVEDIR);
 		}
 		ASSERT(strchr(finalname, '\\') == NULL);
-		error = zfs_mkdir(VTOZ(dvp), finalname, vap, &zp, NULL,
+		error = zfs_mkdir(VTOZ(dvp), finalname, vap, &zp, mkdir_cr,
 		    flags, NULL, NULL);
 		if (error == 0) {
 			vp = ZTOV(zp);
@@ -2005,7 +2049,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			    &zccb,
 			    Irp->Overlay.AllocationSize.QuadPart,
 			    DesiredAccess,
-			    stream_name);
+			    stream_name, Irp);
 
 			if (DeleteOnClose)
 				Status = zfs_setunlink_masked(FileObject, dvp);
@@ -2033,9 +2077,31 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			VN_RELE(dvp);
 			return (Status);
 		}
+		dprintf("%s: zfs_mkdir('%s') failed error %d\n",
+		    __func__, finalname ? finalname : "(null)", error);
 		VN_RELE(dvp);
 		Irp->IoStatus.Information = FILE_DOES_NOT_EXIST;
-		return (STATUS_OBJECT_PATH_NOT_FOUND);
+		switch (error) {
+		case ENOSPC:
+		case EDQUOT:
+			return (STATUS_DISK_FULL);
+		case EACCES:
+		case EPERM:
+			return (STATUS_ACCESS_DENIED);
+		case EROFS:
+			return (STATUS_MEDIA_WRITE_PROTECTED);
+		case EEXIST:
+			Irp->IoStatus.Information = FILE_EXISTS;
+			return (STATUS_OBJECT_NAME_COLLISION);
+		case ENAMETOOLONG:
+			return (STATUS_OBJECT_NAME_INVALID);
+		case EIO:
+			return (STATUS_IO_DEVICE_ERROR);
+		default:
+			dprintf("%s: zfs_mkdir unhandled error %d -> "
+			    "STATUS_UNEXPECTED_IO_ERROR\n", __func__, error);
+			return (STATUS_UNEXPECTED_IO_ERROR);
+		}
 	}
 
 	// If they requested just directory, fail non directories
@@ -2283,14 +2349,48 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			break;
 		}
 
-		// Set UID,GID if passed in.
+		/* Set UID,GID from IRP security context for new file ownership */
 		zfs_security_context_pre(vap,
 		    IrpSp->Parameters.Create.SecurityContext);
 
-		// O_EXCL only if FILE_CREATE
+		/*
+		 * Use SeAccessCheck on the parent's Windows SD as the
+		 * authoritative access check (same rationale as mkdir path).
+		 */
+		cred_t elevated_create_cr = { .cr_uid = 0, .cr_gid = 0 };
+		cred_t *create_cr = cr;
+		PSECURITY_DESCRIPTOR create_parentSD = vnode_security(dvp);
+		if (create_parentSD != NULL) {
+			ACCESS_MASK grantedAccess;
+			NTSTATUS accessStatus;
+			PIO_SECURITY_CONTEXT sc =
+			    IrpSp->Parameters.Create.SecurityContext;
+			SeLockSubjectContext(
+			    &sc->AccessState->SubjectSecurityContext);
+			BOOLEAN winOK = SeAccessCheck(create_parentSD,
+			    &sc->AccessState->SubjectSecurityContext,
+			    TRUE, FILE_ADD_FILE, 0, NULL,
+			    IoGetFileObjectGenericMapping(),
+			    IrpSp->Flags & SL_FORCE_ACCESS_CHECK ?
+			    UserMode : Irp->RequestorMode,
+			    &grantedAccess, &accessStatus);
+			SeUnlockSubjectContext(
+			    &sc->AccessState->SubjectSecurityContext);
+			if (!winOK) {
+				dprintf("%s: SeAccessCheck denied create\n",
+				    __func__);
+				if (vp != NULL)
+					VN_RELE(vp);
+				VN_RELE(dvp);
+				return (accessStatus);
+			}
+			create_cr = &elevated_create_cr;
+		}
+
+		/* O_EXCL only if FILE_CREATE */
 		error = zfs_create(VTOZ(dvp), finalname, vap,
 		    CreateDisposition == FILE_CREATE, vap->va_mode,
-		    &zp, NULL, flags, NULL, NULL);
+		    &zp, create_cr, flags, NULL, NULL);
 		if (error == 0) {
 			boolean_t reenter_for_xattr = B_FALSE;
 
@@ -2309,7 +2409,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 				    Irp->Overlay.AllocationSize.QuadPart,
 				    granted_access ?
 				    granted_access : DesiredAccess,
-				    stream_name);
+				    stream_name, Irp);
 
 				if (DeleteOnClose)
 					Status =
@@ -2372,6 +2472,9 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		else
 			Irp->IoStatus.Information = FILE_DOES_NOT_EXIST;
 
+		dprintf("%s: zfs_create('%s') failed error %d\n",
+		    __func__, finalname ? finalname : "(null)", error);
+
 		UNDO_SHARE_ACCESS(dvp);
 		VN_RELE(dvp);
 		switch (error) {
@@ -2380,9 +2483,26 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		case EDQUOT:
 			return (STATUS_DISK_FULL);
 			// return (STATUS_DISK_QUOTA_EXCEEDED);
-		default:
-			// create file error
+		case EACCES:
+		case EPERM:
+			return (STATUS_ACCESS_DENIED);
+		case EROFS:
+			return (STATUS_MEDIA_WRITE_PROTECTED);
+		case EEXIST:
 			return (STATUS_OBJECT_NAME_COLLISION);
+		case ENOENT:
+			return (STATUS_OBJECT_NAME_NOT_FOUND);
+		case ENOTDIR:
+			return (STATUS_NOT_A_DIRECTORY);
+		case ENAMETOOLONG:
+			return (STATUS_OBJECT_NAME_INVALID);
+		case EIO:
+			return (STATUS_IO_DEVICE_ERROR);
+		default:
+			/* Log unexpected error so it can be mapped properly */
+			dprintf("%s: zfs_create unhandled error %d -> "
+			    "STATUS_UNEXPECTED_IO_ERROR\n", __func__, error);
+			return (STATUS_UNEXPECTED_IO_ERROR);
 		}
 	}
 
@@ -2394,7 +2514,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		    &zccb,
 		    Irp->Overlay.AllocationSize.QuadPart,
 		    granted_access ? granted_access : DesiredAccess,
-		    stream_name);
+		    stream_name, Irp);
 
 		if (DeleteOnClose)
 			Status = zfs_setunlink_masked(FileObject, NULL);
@@ -2422,7 +2542,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		    &zccb,
 		    Irp->Overlay.AllocationSize.QuadPart,
 		    granted_access ? granted_access : DesiredAccess,
-		    stream_name);
+		    stream_name, Irp);
 
 		// Now that vp is set, check delete
 		if (DeleteOnClose)
@@ -4151,10 +4271,16 @@ set_reparse_point(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	dvp = zfs_parent(vp);
 	dzp = VTOZ(dvp);
 
-	// winbtrfs' test/exe will trigger this, add code here.
-	// (asked to create reparse point on already reparse point)
+	/*
+	 * If a reparse point is already set, the caller's tag must match
+	 * the existing tag, otherwise Windows requires STATUS_IO_REPARSE_TAG_MISMATCH.
+	 */
 	if (zp->z_pflags & ZFS_REPARSE) {
-//		DbgBreakPoint();
+		ULONG existing_tag = get_reparse_tag(zp);
+		if (existing_tag != 0 && rdb->ReparseTag != existing_tag) {
+			VN_RELE(dvp);
+			return (STATUS_IO_REPARSE_TAG_MISMATCH);
+		}
 	}
 	// error = zfs_symlink(dzp, , vattr_t * vap, char *link,
 	// 	znode_t * *zpp, cred_t * cr, int flags)
@@ -4210,6 +4336,9 @@ top:
 out:
 	VN_RELE(dvp);
 
+	if (error != 0)
+		Status = zfs_error_to_ntstatus(error);
+
 	dprintf("%s: returning 0x%lx\n", __func__, Status);
 
 	return (Status);
@@ -4264,9 +4393,14 @@ delete_reparse_point(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (zfsctl_delete_reparse_point(zp));
 	}
 
-	// STATUS_IO_REPARSE_TAG_MISMATCH
-	// rdb->ReparseTag != zp->ReparseTag
-
+	/* Tag in the request must match what is stored on the file. */
+	if (zp->z_pflags & ZFS_REPARSE) {
+		ULONG existing_tag = get_reparse_tag(zp);
+		if (existing_tag != 0 && rdb->ReparseTag != existing_tag) {
+			VN_RELE(vp);
+			return (STATUS_IO_REPARSE_TAG_MISMATCH);
+		}
+	}
 
 	// Like zfs_symlink, write the data as SA attribute.
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
@@ -4335,6 +4469,9 @@ out:
 	if (dzp != NULL)
 		zrele(dzp);
 	VN_RELE(vp);
+
+	if (error != 0)
+		Status = zfs_error_to_ntstatus(error);
 
 	dprintf("%s: returning 0x%lx\n", __func__, Status);
 
@@ -6978,7 +7115,8 @@ set_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	NTSTATUS Status = STATUS_SUCCESS;
 
-	dprintf("%s: \n", __func__);
+	dprintf("%s: SecurityInformation 0x%x\n", __func__,
+	    (uint32_t)IrpSp->Parameters.SetSecurity.SecurityInformation);
 
 	if (FileObject == NULL || FileObject->FsContext == NULL)
 		return (STATUS_INVALID_PARAMETER);
@@ -7023,6 +7161,8 @@ set_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		if (Status == STATUS_SUCCESS) {
 			vattr.va_uid = zfs_sid2uid(owner);
 			vattr.va_mask |= ATTR_UID;
+			dprintf("%s: OWNER -> uid=%u (was z_uid=%u)\n",
+			    __func__, vattr.va_uid, zp->z_uid);
 		}
 	}
 	if (IrpSp->Parameters.SetSecurity.SecurityInformation &
@@ -7031,13 +7171,15 @@ set_security(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		Status = RtlGetGroupSecurityDescriptor(vnode_security(vp),
 		    &group, &defaulted);
 		if (Status == STATUS_SUCCESS) {
-			// uid/gid reverse is identical
+			/* uid/gid reverse is identical */
 			vattr.va_gid = zfs_sid2uid(group);
 			vattr.va_mask |= ATTR_GID;
+			dprintf("%s: GROUP -> gid=%u (was z_gid=%u)\n",
+			    __func__, vattr.va_gid, zp->z_gid);
 		}
 	}
 
-	// Do we need to update ZFS?
+	/* Do we need to update ZFS? */
 	if (vattr.va_mask != 0) {
 		zfs_setattr(zp, &vattr, 0, NULL, NULL);
 		Status = STATUS_SUCCESS;
@@ -7178,7 +7320,7 @@ volume_create(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
 		    FileObject, zp->z_size, &zccb,
 		    AllocationSize,
 		    DesiredAccess,
-		    NULL);
+		    NULL, Irp);
 		// Undo the ref inside couplefileobject.
 		vnode_rele(vp);
 		atomic_inc_64(&zmo->volume_opens);
@@ -9890,6 +10032,7 @@ fastio_query_open(PIRP Irp,
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
 	struct vnode *vp = NULL, *dvp = NULL;
+	cred_t cr_buf;
 
 	PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
 #if 0
@@ -9926,8 +10069,9 @@ fastio_query_open(PIRP Irp,
 
 		filename[outlen] = 0;
 
+		spl_fill_cred_from_irp(&cr_buf, Irp);
 		error = zfs_find_dvp_vp(zfsvfs, filename, 0, 0,
-		    &lastname, &dvp, &vp, 0, 0);
+		    &lastname, &dvp, &vp, 0, 0, &cr_buf);
 
 // Handle reparse, or return FALSE/FAIL?
 //		if (error == STATUS_REPARSE)

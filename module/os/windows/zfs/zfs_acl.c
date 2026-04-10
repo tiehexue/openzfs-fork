@@ -1693,8 +1693,14 @@ zfs_acl_ids_create(znode_t *dzp, int flag, vattr_t *vap, cred_t *cr,
 		    ZFS_GROUP, &acl_ids->z_fuidp);
 		gid = vap->va_gid;
 	} else {
-		acl_ids->z_fuid = zfs_fuid_create_cred(zfsvfs, ZFS_OWNER,
-		    cr, &acl_ids->z_fuidp);
+		if (vap->va_mask & ATTR_UID) {
+			acl_ids->z_fuid = zfs_fuid_create(zfsvfs,
+			    (uint64_t)vap->va_uid, cr,
+			    ZFS_OWNER, &acl_ids->z_fuidp);
+		} else {
+			acl_ids->z_fuid = zfs_fuid_create_cred(zfsvfs,
+			    ZFS_OWNER, cr, &acl_ids->z_fuidp);
+		}
 		acl_ids->z_fgid = 0;
 		if (vap->va_mask & ATTR_GID)  {
 			acl_ids->z_fgid = zfs_fuid_create(zfsvfs,

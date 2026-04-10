@@ -27,6 +27,7 @@
 
 
 #include <sys/mount.h>
+#include <sys/cred.h>
 
 extern PDEVICE_OBJECT ioctlDeviceObject;
 extern PDEVICE_OBJECT fsDiskDeviceObject;
@@ -67,6 +68,13 @@ struct zfs_ccb {
 	ACCESS_MASK access;
 
 	boolean_t HoldsOplock;
+
+	/*
+	 * Credentials of the process that opened this FileObject, captured
+	 * at IRP_MJ_CREATE time via spl_fill_cred_from_irp().  Embedded
+	 * (not a pointer) so no separate allocation is needed.
+	 */
+	cred_t cred;
 };
 
 typedef struct zfs_ccb zfs_ccb_t;
@@ -182,7 +190,8 @@ extern NTSTATUS pnp_query_device_text(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 extern int zfs_init_cache(FILE_OBJECT *fo, struct vnode *vp,
     CC_FILE_SIZES *ccfs);
 extern void zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *,
-    uint64_t size, zfs_ccb_t **ccb, uint64_t alloc, ACCESS_MASK, char *stream);
+    uint64_t size, zfs_ccb_t **ccb, uint64_t alloc, ACCESS_MASK, char *stream,
+    PIRP Irp);
 extern void zfs_decouplefileobject(vnode_t *vp, FILE_OBJECT *fileobject);
 
 /* zfs_vnop_windows_lib.h */
@@ -200,7 +209,8 @@ extern NTSTATUS zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp, boolean_t);
 extern NTSTATUS zfs_setunlink_masked(FILE_OBJECT *fo, vnode_t *dvp);
 extern int zfs_find_dvp_vp(zfsvfs_t *, char *, int finalpartmaynotexist,
     int finalpartmustnotexist, char **lastname, struct vnode **dvpp,
-    struct vnode **vpp, int flags, ULONG options);
+    struct vnode **vpp, int flags, ULONG options, cred_t *cr);
+extern void spl_fill_cred_from_irp(cred_t *cr, PIRP Irp);
 extern ULONG get_reparse_tag(znode_t *zp);
 extern void acl_trivial_access_masks(mode_t mode, boolean_t isdir,
     trivial_acl_t *masks);
@@ -225,6 +235,9 @@ extern NTSTATUS volume_create(PDEVICE_OBJECT DeviceObject,
 extern NTSTATUS volume_close(PDEVICE_OBJECT DeviceObject,
     PFILE_OBJECT FileObject);
 
+
+/* Translate a POSIX errno to the appropriate NTSTATUS code. */
+extern NTSTATUS zfs_error_to_ntstatus(int error);
 
 /* IRP_MJ_SET_INFORMATION helpers */
 extern NTSTATUS set_file_basic_information(PDEVICE_OBJECT, PIRP,

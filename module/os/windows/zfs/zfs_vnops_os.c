@@ -390,13 +390,15 @@ zfs_lookup(znode_t *zdp, char *nm, znode_t **zpp, int flags,
 
 		/*
 		 * Do we have permission to get into attribute directory?
+		 * On Windows, bypass the POSIX check (see traverse below).
 		 */
-
+#ifndef _WIN32
 		if ((error = zfs_zaccess(*zpp, ACE_EXECUTE, 0,
 		    B_FALSE, cr, NULL))) {
 			zrele(*zpp);
 			*zpp = NULL;
 		}
+#endif
 
 		zfs_exit(zfsvfs, FTAG);
 		return (error);
@@ -410,12 +412,22 @@ zfs_lookup(znode_t *zdp, char *nm, znode_t **zpp, int flags,
 
 	/*
 	 * Check accessibility of directory.
+	 *
+	 * On Windows, SeChangeNotifyPrivilege (bypass traverse checking) is
+	 * granted to all standard users by default, so NTFS never enforces
+	 * directory execute/traverse permission checks via POSIX mode bits.
+	 * The Windows-level access check on the final target is done via
+	 * SeAccessCheck() in the IRP_MJ_CREATE handler. Applying the POSIX
+	 * traverse check here blocks non-admin users from opening any file
+	 * whose parent directory is owned by root (uid 0), even when the
+	 * Windows DACL would permit it.
 	 */
-
+#ifndef _WIN32
 	if ((error = zfs_zaccess(zdp, ACE_EXECUTE, 0, B_FALSE, cr, NULL))) {
 		zfs_exit(zfsvfs, FTAG);
 		return (error);
 	}
+#endif
 
 	if (zfsvfs->z_utf8 && u8_validate(nm, strlen(nm),
 	    NULL, U8_VALIDATE_ENTIRE, &error) < 0) {
@@ -2796,7 +2808,13 @@ top:
 	 * done in a single check.
 	 */
 
-	if ((error = zfs_zaccess_rename(sdzp, szp, tdzp, tzp, cr, NULL)))
+	/*
+	 * On Windows, the IO Manager already validated DELETE access on the
+	 * source FileObject at open time. Skip the redundant POSIX ACL check
+	 * when the caller signals this with FBYPASS_ZFS_ACL.
+	 */
+	if (!(flags & FBYPASS_ZFS_ACL) &&
+	    (error = zfs_zaccess_rename(sdzp, szp, tdzp, tzp, cr, NULL)))
 		goto out;
 
 	if (S_ISDIR(szp->z_mode)) {

@@ -1848,12 +1848,15 @@ mount_volume_impl(void *arg1)
 }
 
 NTSTATUS
-matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
-    mount_t *dcb, PVPB vpb)
+matched_mount(PIRP Irp, PDEVICE_OBJECT DeviceToMount,
+    mount_t *dcb, PIO_STACK_LOCATION IrpSp)
 {
 	zfsvfs_t *xzfsvfs = NULL;
 	NTSTATUS status;
 	PDEVICE_OBJECT volDeviceObject;
+	PDEVICE_OBJECT DeviceObject =
+	    IrpSp->Parameters.MountVolume.DeviceObject;
+	PVPB vpb = IrpSp->Parameters.MountVolume.Vpb;
 
 	if (xzfsvfs && xzfsvfs->z_unmounted) {
 		dprintf("%s: Is a ZFS dataset -- unmounted. dcb %p ignoring: "
@@ -1989,7 +1992,8 @@ matched_mount(PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT DeviceToMount,
 			/* This open needs to point to the real root zp */
 			if (zfs_zget(zfsvfs, zfsvfs->z_root, &zp) == 0) {
 				zfs_couplefileobject(ZTOV(zp), NULL,
-				    vcb->root_file, 0ULL, &zccb, 0ULL, 0, NULL);
+				    vcb->root_file, 0ULL, &zccb, 0ULL, 0, NULL,
+				    Irp);
 				zrele(zp);
 			}
 			vcb->root_file->Vpb = vpb;
@@ -2106,10 +2110,9 @@ zfs_vnop_mount(PDEVICE_OBJECT DiskDevice, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 		if (dcb != NULL && dcb->type == MOUNT_TYPE_DCB &&
 		    !vfs_isunmount(dcb)) {
 
-			status = matched_mount(
-			    IrpSp->Parameters.MountVolume.DeviceObject,
+			status = matched_mount(Irp,
 			    DeviceToMount,
-			    dcb, IrpSp->Parameters.MountVolume.Vpb);
+			    dcb, IrpSp);
 
 			ObDereferenceObject(currentDevice);
 			dprintf("%s: exit: 0x%lx\n", __func__, status);

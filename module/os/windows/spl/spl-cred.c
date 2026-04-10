@@ -181,7 +181,8 @@ spl_get_caller_gid(void)
 uid_t
 crgetuid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_uid);
 	return (spl_get_caller_uid());
 }
 
@@ -190,7 +191,8 @@ crgetuid(const cred_t *cr)
 uid_t
 crgetruid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_uid);
 	return (spl_get_caller_uid());
 }
 
@@ -198,7 +200,8 @@ crgetruid(const cred_t *cr)
 uid_t
 crgetsuid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_uid);
 	return (spl_get_caller_uid());
 }
 
@@ -206,7 +209,8 @@ crgetsuid(const cred_t *cr)
 uid_t
 crgetfsuid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_uid);
 	return (spl_get_caller_uid());
 }
 
@@ -214,7 +218,8 @@ crgetfsuid(const cred_t *cr)
 gid_t
 crgetgid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_gid);
 	return (spl_get_caller_gid());
 }
 
@@ -222,7 +227,8 @@ crgetgid(const cred_t *cr)
 gid_t
 crgetrgid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_gid);
 	return (spl_get_caller_gid());
 }
 
@@ -230,7 +236,8 @@ crgetrgid(const cred_t *cr)
 gid_t
 crgetsgid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_gid);
 	return (spl_get_caller_gid());
 }
 
@@ -238,8 +245,63 @@ crgetsgid(const cred_t *cr)
 gid_t
 crgetfsgid(const cred_t *cr)
 {
-	(void) cr;
+	if (cr != NULL)
+		return (cr->cr_gid);
 	return (spl_get_caller_gid());
+}
+
+/*
+ * Fill a cred_t from the token of the process that originated an IRP.
+ * Uses IoGetRequestorProcess() so it works correctly even when called
+ * from a system worker thread (unlike PsGetCurrentProcess()).
+ * Falls back to uid/gid 0 on any error so existing kernel paths are safe.
+ */
+void
+spl_fill_cred_from_irp(cred_t *cr, PIRP Irp)
+{
+	PEPROCESS proc;
+	PACCESS_TOKEN token;
+	PTOKEN_USER tuser = NULL;
+	PTOKEN_PRIMARY_GROUP tgrp = NULL;
+	NTSTATUS status;
+
+	ASSERT(cr != NULL);
+	cr->cr_uid = 0;
+	cr->cr_gid = 0;
+
+	if (Irp == NULL)
+		return;
+
+	proc = IoGetRequestorProcess(Irp);
+	if (proc == NULL)
+		return;
+
+	token = PsReferencePrimaryToken(proc);
+	if (token == NULL)
+		return;
+
+	/* Admin / elevated token -> uid 0, gid 0 */
+	if (SeTokenIsAdmin(token)) {
+		PsDereferencePrimaryToken(token);
+		return;
+	}
+
+	status = SeQueryInformationToken(token, TokenUser, (PVOID *)&tuser);
+	if (NT_SUCCESS(status) && tuser != NULL) {
+		cr->cr_uid = spl_sid_to_uid((struct _SID *)tuser->User.Sid);
+		ExFreePool(tuser);
+	}
+
+	status = SeQueryInformationToken(token, TokenPrimaryGroup,
+	    (PVOID *)&tgrp);
+	if (NT_SUCCESS(status) && tgrp != NULL) {
+		cr->cr_gid = spl_sid_to_gid((struct _SID *)tgrp->PrimaryGroup);
+		ExFreePool(tgrp);
+	}
+
+	PsDereferencePrimaryToken(token);
+	dprintf("spl_fill_cred_from_irp: uid=%u gid=%u\n",
+	    cr->cr_uid, cr->cr_gid);
 }
 
 

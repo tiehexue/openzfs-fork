@@ -31,8 +31,10 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 
-struct ucred; // fixme
-typedef struct ucred cred_t;
+typedef struct cred {
+	uid_t	cr_uid;		/* effective user id */
+	gid_t	cr_gid;		/* effective group id */
+} cred_t;
 
 #define	kcred	(cred_t *)NULL
 #define	CRED()	(cred_t *)NULL
