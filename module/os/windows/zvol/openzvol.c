@@ -407,8 +407,7 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 		DriverObject = OpenZVOL_DriverObject;
 	}
 
-	// If Storport is unloaded, and DEREGISTER has been called,
-	// we proceed.
+	// Only proceed once Storport has unloaded and no IO is in progress.
 	if (!Storport_Unloaded || pzvol_os_read_zv != NULL)
 		return;
 
@@ -424,12 +423,12 @@ OpenZVOLUnloadRoutine(IN PDRIVER_OBJECT DriverObject)
 	IoDeleteSymbolicLink(&symbolicLinkName);
 	IoDeleteSymbolicLink(&symbolicLinkName2);
 
-	if (Deregister_Unload == 1ULL) {
-		if (StopUnload_DriverObject)
-			IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
+	if (StopUnload_DriverObject != NULL) {
+		IoDeleteDevice(StopUnload_DriverObject->DeviceObject);
 		StopUnload_DriverObject = NULL;
-		if (OpenZVOL_DriverObject)
-			IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
+	}
+	if (OpenZVOL_DriverObject != NULL) {
+		IoDeleteDevice(OpenZVOL_DriverObject->DeviceObject);
 		OpenZVOL_DriverObject = NULL;
 	}
 
@@ -596,6 +595,16 @@ OpenZVOL_Fini(PDRIVER_OBJECT DriverObject)
 {
 	(void) DriverObject;
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "OpenZVOL_Fini\n"));
+
+	/*
+	 * Storport is unloading.  Tear down the \Device\OpenZVOL communication
+	 * device before our code pages are freed.  Without this, the
+	 * OpenZFS.sys polling thread (zvol_os_wait_openzvol) can call
+	 * IoGetDeviceObjectPointer, find the device still in the namespace,
+	 * and have the kernel dispatch an IRP into our freed code — which
+	 * produces a 0xCE bugcheck.
+	 */
+	OpenZVOLUnloadRoutine(NULL);
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
 	    "OpenZVOL: Goodbye.\n"));
