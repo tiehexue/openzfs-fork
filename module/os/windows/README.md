@@ -256,43 +256,43 @@ Windows Updates run, you can disable those in gpedit.msc
 
   ✅ Compile ZFS on top of ZFS
 
+  ✅ Async vdev_disk.c I/O
+
+  ✅ posix.c substantially complete
+
+  ✅ DriveLetter dataset property (zfs set driveletter=Z pool)
+  *  Assigned first-available letter if set to "?:"
+  *  Imported Unix pools default to drive-letter mount
+
+  ✅ ZFS delegation (zfs allow / zfs unallow)
+
+  ✅ Windows Security Descriptor / ACL integration
+  *  SeAccessCheck on parent SD authoritative for IRP_MJ_CREATE
+  *  ZFS POSIX ACL checked via uid=0 credential bypass
+
+  ✅ UAC elevation relay for privileged operations
+
+  ✅ xattrs and alternate data streams (NTFS ADS)
+  *  Stream rename not yet supported
+
   ❎ Scrooge McDuck style swim in cash
 
 ---
 
 # Design issues that need addressing.
 
-* Windows does not handle EFI labels, for now they are parsed with
-libefi, and we send offset and size with the filename, that both
-libzfs and kernel will parse out and use. This works for a proof
-of concept.
+* Windows does not natively handle EFI disk labels. The current
+workaround encodes partition offset and size in the device filename,
+which is parsed by both libzfs and the kernel driver. This is
+functional but not ideal; a cleaner solution would be a thin virtual
+disk driver that presents EFI partitions directly to Windows. This
+remains an open item.
 
-Possibly a more proper solution would be to write a thin virtual
-hard disk driver, which reads the EFI label and present just the
-partitions.
+* Alternate data streams (xattrs / NTFS ADS) are implemented.
+Renaming streams is not yet supported.
 
-* vdev_disk.c spawns a thread to get around that IoCompletionRoutine
-is called in a different context, to sleep until signalled. Is there
-a better way to do async in Windows?
-
-* ThreadId should be checked, using PsGetCurrentThreadId() but
-it makes zio_taskq_member(taskq_member()) crash. Investigate.
-
-* Functions in posix.c need sustenance.
-
-Add dataset property DriveLetter, which is ignored on Unix system.
-So for a simple drive letter dataset:
-
-zfs set driveletter=Z pool
-
-The default creating of a new pool, AND, importing a UNIX pool, would
-set the root dataset to
-
-driveletter=?:
-
-So it is assigned first-available drive letter. All lower datasets
-will be mounted inside the drive letter. If pool's WinDriveLetter is
-not set, it will mount "/pool" as "C:/pool".
+* cmdbox/console text colour attributes (ANSI escape sequences) are
+not yet wired up in posix.c.
 
 ---
 
