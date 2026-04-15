@@ -143,9 +143,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 	initDbgCircularBuffer();
 
 #ifdef DBG
-	// DEBUG build, let's be noisy by default.
-	extern int zfs_flags;
-	zfs_flags |= 1;
+	// DEBUG build - dprintf controlled via zfs_flags / ZFS_DEBUG_DPRINTF.
+	// Default is off; set zfs_flags |= 1 at runtime to enable.
 #endif
 
 	sysctl_os_init(pRegistryPath);

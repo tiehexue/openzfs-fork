@@ -109,15 +109,20 @@
 #define	PANIC(...) spl_panic(__FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 extern void printBuffer(const char *fmt, ...);
+extern int zfs_flags;
+#ifndef ZFS_DEBUG_DPRINTF
+#define	ZFS_DEBUG_DPRINTF (1 << 0)
+#endif
 
 #define	LUDICROUS_SPEED // use circular buffer
 // xprintf is always printed
-// dprintf is printed in DEBUG builds
+// dprintf is printed when ZFS_DEBUG_DPRINTF flag is set in zfs_flags
 // IOLog is printed in DEBUG builds (legacy from osx)
 
 #ifdef LUDICROUS_SPEED
 
-#define	dprintf(...) printBuffer(__VA_ARGS__)
+#define	dprintf(...) \
+	if (zfs_flags & ZFS_DEBUG_DPRINTF) printBuffer(__VA_ARGS__)
 #define	IOLog(...) printBuffer(__VA_ARGS__)
 #define	xprintf(...) KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, \
     __VA_ARGS__))
@@ -130,8 +135,10 @@ extern void printBuffer(const char *fmt, ...);
 
 #undef KdPrintEx
 #define	KdPrintEx(_x_) DbgPrintEx _x_
-#define	dprintf(...) KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, \
-    __VA_ARGS__))
+#define	dprintf(...) \
+	if (zfs_flags & ZFS_DEBUG_DPRINTF) \
+		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, \
+		    __VA_ARGS__))
 #define	IOLog(...) KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, \
     __VA_ARGS__))
 #define	xprintf(...) KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, \
