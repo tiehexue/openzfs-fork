@@ -1,69 +1,155 @@
-######################################################################################
-#                                                                                    #
-#    If you're looking for instructions on how to build this under windows go to     #
-#https://github.com/openzfsonwindows/openzfs/blob/windows/module/os/windows/README.md#
-#                                                                                    #
-######################################################################################
+#
+# This based on work that Andrew Innes <andrew.c12@gmail.com> did for OpenZFSonWindows,
+# reworked for me to understand what it did, so I can support it myself.
+# - Lundman
+#
 
-name: "CodeQL windows"
+name: CodeQL Windows
 
 on:
   push:
+    branches:
+      - zfs-Windows-*-release
+    tags-ignore:
+      - '*'
   pull_request:
+    branches:
+      - zfs-Windows-*-release
+  workflow_dispatch:
 
-env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
-  BUILD_TYPE: Debug
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
-    name: Analyze
-    timeout-minutes: 120
-    # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
-    # You can convert this to a matrix build if you need cross-platform coverage.
-    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
     runs-on: windows-latest
-    permissions:
-        actions: read
-        contents: read
-        security-events: write
+    timeout-minutes: 30
 
     steps:
-    - uses: ilammy/msvc-dev-cmd@v1
+      - name: Enter MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
 
-    - uses: actions/checkout@v3
-      with:
-        #repository: openzfsonwindows/openzfs
-        fetch-depth: 0
+      - name: Checkout OpenZFS
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    - name: Import signing certificate
-      run: |
-        $plaintextpwd = 'password1234'
-        $pwd = ConvertTo-SecureString -String $plaintextpwd -Force -AsPlainText
-        Import-PfxCertificate -FilePath ${{github.workspace}}/contrib/windows/TestCert/test_sign_cert_pass.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pwd -Exportable
+      - name: Checkout OpenSSL
+        uses: actions/checkout@v5
+        with:
+          repository: openzfsonwindows/openssl
+          ref: openssl-3.5.5
+          path: openssl
 
-    - name: Checkout openssl
-      uses: actions/checkout@v3
-      with:
-        repository: andrewc12/openssl # optional, default is ${{ github.repository }}
-        path: openssl # optional
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
 
-    # Initializes the CodeQL tools for scanning.
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
-        # Override language selection by uncommenting this and choosing your languages
-      with:
-          languages: cpp
+      - name: Create OpenZFS test signing certificate
+        shell: pwsh
+        run: |
+          $certSubject = "OpenZFS Test Signing Certificate"
+          $pfxPath = "$env:RUNNER_TEMP\openzfs-test-signing.pfx"
+          $pfxPassword = "password123"
+          $pwd = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
 
-    - name: Configure CMake
-      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -G "Ninja" -B ${{github.workspace}}/out/build/x64-Debug ${{github.workspace}}  -DOPENSSL_ROOT_DIR=${{github.workspace}}/openssl/ -DCRYPTO_STATIC_TEST=${{github.workspace}}/openssl/lib/VC/static/libcrypto64MTd.lib -DLIB_EAY_DEBUG=${{github.workspace}}/openssl/lib/VC/static/libcrypto64MTd.lib -DLIB_EAY_RELEASE=${{github.workspace}}/openssl/lib/VC/static/libcrypto64MT.lib -DOPENSSL_INCLUDE_DIR=${{github.workspace}}/openssl/include -DSSL_EAY_DEBUG=${{github.workspace}}/openssl/lib/VC/static/libssl64MTd.lib -DSSL_EAY_RELEASE=${{github.workspace}}/openssl/lib/VC/static/libssl64MT.lib
+          $cert = New-SelfSignedCertificate `
+            -Subject "CN=$certSubject" `
+            -Type CodeSigningCert `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -HashAlgorithm SHA256 `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -KeyExportPolicy Exportable `
+            -NotAfter (Get-Date).AddDays(30)
 
-    - name: Build
-      working-directory: ${{github.workspace}}/out/build/x64-Debug
-      # Build your program with the given configuration
-      run: cmake --build ${{github.workspace}}/out/build/x64-Debug
+          if (-not $cert) {
+            throw "Failed to create test signing certificate"
+          }
 
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+          Export-PfxCertificate `
+            -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" `
+            -FilePath $pfxPath `
+            -Password $pwd | Out-Null
+
+          if (-not (Test-Path $pfxPath)) {
+            throw "Failed to export PFX"
+          }
+
+          "OPENZFS_SIGNTOOL_CERTSTORE=My" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENZFS_SIGNTOOL_CERTNAME=$certSubject" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENZFS_SIGNTOOL_SHA1=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENZFS_SIGNTOOL_TSA=http://timestamp.digicert.com" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENZFS_TEST_CERT_PFX=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENZFS_TEST_CERT_PASSWORD=$pfxPassword" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Created certificate:"
+          Write-Host "  Subject:    $certSubject"
+          Write-Host "  Store:      My"
+          Write-Host "  Thumbprint: $($cert.Thumbprint)"
+          Write-Host "  PFX:        $pfxPath"
+
+      - name: Install WDK via NuGet
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Windows.WDK.x64 `
+            -Version 10.0.26100.6584 `
+            -OutputDirectory "${{ github.workspace }}\packages" `
+            -Source https://api.nuget.org/v3/index.json
+
+      - name: Set WDK and SDK roots
+        shell: pwsh
+        run: |
+          $wdk = Get-ChildItem "${{ github.workspace }}\packages" -Directory |
+            Where-Object { $_.Name -like "Microsoft.Windows.WDK.x64.*" } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+      
+          $sdk = Get-ChildItem "${{ github.workspace }}\packages" -Directory |
+            Where-Object { $_.Name -like "Microsoft.Windows.SDK.CPP.*" -and $_.Name -notlike "*.x64.*" } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+      
+          if (-not $wdk) { throw "WDK package directory not found" }
+          if (-not $sdk) { throw "SDK package directory not found" }
+      
+          $env:WDKContentRoot = Join-Path $wdk.FullName "c"
+          $env:WINSDK_NUGET_ROOT = Join-Path $sdk.FullName "c"
+      
+          "WDKContentRoot=$env:WDKContentRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINSDK_NUGET_ROOT=$env:WINSDK_NUGET_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+      
+          Write-Host "WDKContentRoot=$env:WDKContentRoot"
+          Write-Host "WINSDK_NUGET_ROOT=$env:WINSDK_NUGET_ROOT"
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -G "Ninja" `
+            -B "${{ github.workspace }}/out/build/x64-Debug" `
+            "${{ github.workspace }}" `
+            -DOPENSSL_ROOT_DIR="${{ github.workspace }}/openssl" `
+            -DOPENSSL_INCLUDE_DIR="${{ github.workspace }}/openssl/include/x64" `
+            -DCRYPTO_STATIC_TEST="${{ github.workspace }}/openssl/lib/VC/x64/MTd/libcrypto_static.lib" `
+            -DLIB_EAY_DEBUG="${{ github.workspace }}/openssl/lib/VC/x64/MTd/libcrypto_static.lib" `
+            -DLIB_EAY_RELEASE="${{ github.workspace }}/openssl/lib/VC/x64/MT/libcrypto_static.lib" `
+            -DSSL_EAY_DEBUG="${{ github.workspace }}/openssl/lib/VC/x64/MTd/libssl_static.lib" `
+            -DSSL_EAY_RELEASE="${{ github.workspace }}/openssl/lib/VC/x64/MT/libssl_static.lib" `
+            -DOPENZFS_SIGNTOOL_CERTSTORE="$env:OPENZFS_SIGNTOOL_CERTSTORE" `
+            -DOPENZFS_SIGNTOOL_CERTNAME="$env:OPENZFS_SIGNTOOL_CERTNAME" `
+            -DOPENZFS_SIGNTOOL_SHA1="$env:OPENZFS_SIGNTOOL_SHA1" `
+            -DOPENZFS_SIGNTOOL_TSA="$env:OPENZFS_SIGNTOOL_TSA"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build "${{ github.workspace }}/out/build/x64-Debug" --parallel
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
+
