@@ -1989,7 +1989,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 		vap->va_mode |= S_IFDIR;
 		vap->va_mask |= (ATTR_MODE | ATTR_TYPE);
 
-		/* Set UID,GID from IRP security context for new dir ownership */
+		/* Set UID,GID from IRP security context for new ownership */
 		zfs_security_context_pre(vap,
 		    IrpSp->Parameters.Create.SecurityContext);
 
@@ -2349,7 +2349,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			break;
 		}
 
-		/* Set UID,GID from IRP security context for new file ownership */
+		/* Set UID,GID from IRP security context for new ownership */
 		zfs_security_context_pre(vap,
 		    IrpSp->Parameters.Create.SecurityContext);
 
@@ -4273,7 +4273,8 @@ set_reparse_point(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 	/*
 	 * If a reparse point is already set, the caller's tag must match
-	 * the existing tag, otherwise Windows requires STATUS_IO_REPARSE_TAG_MISMATCH.
+	 * the existing tag, otherwise Windows requires
+	 * STATUS_IO_REPARSE_TAG_MISMATCH.
 	 */
 	if (zp->z_pflags & ZFS_REPARSE) {
 		ULONG existing_tag = get_reparse_tag(zp);
@@ -5749,8 +5750,6 @@ zfs_read_wrap(vnode_t *vp, uint8_t *data, uint64_t start,
 	NTSTATUS Status;
 	znode_t *zp = VTOZ(vp);
 
-	dprintf("(%p, %p, %I64x, %I64x, %p)\n", vp, data, start, length, pbr);
-
 	VERIFY3P(zp, !=, NULL);
 
 	if (pbr)
@@ -5770,9 +5769,6 @@ zfs_read_wrap(vnode_t *vp, uint8_t *data, uint64_t start,
 	zfs_uio_t uio;
 	zfs_uio_iovec_init(&uio, &iov, 1, start, UIO_SYSSPACE,
 	    length, 0);
-
-	dprintf("%s: offset %llx size %llx\n", __func__,
-	    start, length);
 
 	if (Irp->MdlAddress == NULL &&
 	    Irp->UserBuffer != NULL) {
@@ -5815,12 +5811,6 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 	if (!vp || !VTOZ(vp))
 		return (STATUS_INTERNAL_ERROR);
 
-	dprintf("vp = %p\n", vp);
-	dprintf("offset = %I64x, length = %lx\n", start, length);
-	dprintf("paging_io = %s, no cache = %s\n",
-	    Irp->Flags & IRP_PAGING_IO ? "true" : "false",
-	    nocache ? "true" : "false");
-
 	if (!vnode_isreg(vp))
 		return (STATUS_INVALID_DEVICE_REQUEST);
 
@@ -5840,10 +5830,6 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 		    start, vp->FileHeader.FileSize.QuadPart);
 		return (STATUS_END_OF_FILE);
 	}
-
-	dprintf("FileObject %p vp %p FileSize = %I64x st_size = %I64x\n",
-	    FileObject, vp, vp->FileHeader.FileSize.QuadPart,
-	    VTOZ(vp)->z_size);
 
 	if (!nocache && (IrpSp->MinorFunction & IRP_MN_MDL)) {
 		NTSTATUS Status = STATUS_SUCCESS;
@@ -5927,13 +5913,6 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 			}
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-	dprintf("CcCopyReadEx(%p, %I64x, %lx, %u, %p, %p, %p)\n",
-	    FileObject, IrpSp->Parameters.Read.ByteOffset.QuadPart,
-	    length, wait, data, &Irp->IoStatus, Irp->Tail.Overlay.Thread);
-	dprintf("sizes = %I64x, %I64x, %I64x\n",
-	    vp->FileHeader.AllocationSize.QuadPart,
-	    vp->FileHeader.FileSize.QuadPart,
-	    vp->FileHeader.ValidDataLength.QuadPart);
 			if (!CcCopyReadEx(FileObject,
 			    &IrpSp->Parameters.Read.ByteOffset,
 			    length, wait, data, &Irp->IoStatus,
@@ -5943,15 +5922,7 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 				IoMarkIrpPending(Irp);
 				return (STATUS_PENDING);
 			}
-			dprintf("CcCopyReadEx finished\n");
 #else
-	dprintf("CcCopyRead(%p, %I64x, %lx, %u, %p, %p)\n", FileObject,
-	    IrpSp->Parameters.Read.ByteOffset.QuadPart, length, wait,
-	    data, &Irp->IoStatus);
-	dprintf("sizes = %I64x, %I64x, %I64x\n",
-	    vp->FileHeader.AllocationSize.QuadPart,
-	    vp->FileHeader.FileSize.QuadPart,
-	    vp->FileHeader.ValidDataLength.QuadPart);
 			if (!CcCopyRead(FileObject,
 			    &IrpSp->Parameters.Read.ByteOffset,
 			    length, wait, data, &Irp->IoStatus)) {
@@ -5960,7 +5931,6 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 				IoMarkIrpPending(Irp);
 				return (STATUS_PENDING);
 			}
-			dprintf("CcCopyRead finished\n");
 #endif
 		} except(EXCEPTION_EXECUTE_HANDLER) {
 			Status = GetExceptionCode();
@@ -5990,8 +5960,6 @@ fs_read_impl(PIRP Irp, boolean_t wait, uint64_t *bytes_read)
 	}
 
 	*bytes_read += addon;
-	dprintf("read %llu bytes\n", *bytes_read);
-
 	Irp->IoStatus.Information = *bytes_read;
 
 	return (Status);
@@ -6080,7 +6048,9 @@ fs_read(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	// Don't offload jobs when doing paging IO - otherwise this can lead to
 	// deadlocks in CcCopyRead.
 
-	if (!(Irp->Flags & IRP_PAGING_IO) && FileObject->SectionObjectPointer &&
+	if ((Irp->Flags & IRP_NOCACHE) &&
+	    !(Irp->Flags & IRP_PAGING_IO) &&
+	    FileObject->SectionObjectPointer &&
 	    FileObject->SectionObjectPointer->DataSectionObject) {
 		IO_STATUS_BLOCK iosb;
 
@@ -6130,13 +6100,6 @@ end:
 
 	Irp->IoStatus.Status = Status;
 
-	dprintf("IrpSp->Parameters.Read.Length = %08lx\n",
-	    IrpSp->Parameters.Read.Length);
-	dprintf("Irp->IoStatus.Status = %08lx\n",
-	    Irp->IoStatus.Status);
-	dprintf("Irp->IoStatus.Information = %Iu bytesread %llu\n",
-	    Irp->IoStatus.Information, bytes_read);
-
 	VN_RELE(vp);
 
 	zfs_exit(zfsvfs, FTAG);
@@ -6164,9 +6127,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	boolean_t paging_lock = FALSE, acquired_vp_lock = FALSE,
 	    pagefile;
 	ULONG filter = 0;
-
-	dprintf("(%p, %p, %I64x, %p, %lx, %u, %u)\n", DeviceObject,
-	    FileObject, offset.QuadPart, buf, *length, paging_io, no_cache);
 
 	if (*length == 0) {
 		dprintf("returning success for zero-length write\n");
@@ -6197,8 +6157,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		offset = vp->FileHeader.FileSize;
 
 	off64 = offset.QuadPart;
-
-	dprintf("vp->Header.Flags = %x\n", vp->FileHeader.Flags);
 
 	if (!no_cache && !CcCanIWrite(FileObject, *length, wait,
 	    deferred_write)) {
@@ -6296,8 +6254,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	if (zp->z_unlinked)
 		newlength = 0;
 
-	dprintf("newlength = %I64x\n", newlength);
-
 	if (off64 + *length > newlength) {
 		if (paging_io) {
 			if (off64 >= newlength) {
@@ -6384,9 +6340,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
  * being called before the job has run. See ifstest ReadWriteTest.
  */
 
-				dprintf("CcCopyWrite(%p, %I64x, %lx, %p, %p)\n",
-				    FileObject, off64, *length, buf,
-				    Irp->Tail.Overlay.Thread);
 #if (NTDDI_VERSION >= NTDDI_WIN8)
 				if (!CcCopyWriteEx(FileObject, &offset, *length,
 				    TRUE, buf, Irp->Tail.Overlay.Thread)) {
@@ -6556,12 +6509,8 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 end:
 	if (NT_SUCCESS(Status) && FileObject->Flags & FO_SYNCHRONOUS_IO &&
 	    !paging_io) {
-		dprintf("CurrentByteOffset was: %I64x\n",
-		    FileObject->CurrentByteOffset.QuadPart);
 		FileObject->CurrentByteOffset.QuadPart =
 		    offset.QuadPart + (NT_SUCCESS(Status) ? *length : 0);
-		dprintf("CurrentByteOffset now: %I64x\n",
-		    FileObject->CurrentByteOffset.QuadPart);
 	}
 
 	if (paging_lock)
@@ -6589,9 +6538,6 @@ fs_write_impl(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp,
 
 	Irp->IoStatus.Information = 0;
 
-	dprintf("offset = %I64x\n", offset.QuadPart);
-	dprintf("length = %lx\n", IrpSp->Parameters.Write.Length);
-
 	if (IrpSp->Parameters.Write.Length == 0) {
 		Status = STATUS_SUCCESS;
 		goto exit;
@@ -6610,8 +6556,6 @@ fs_write_impl(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp,
 	} else {
 		buf = Irp->AssociatedIrp.SystemBuffer;
 	}
-
-	dprintf("buf = %p\n", buf);
 
 	if (vp && !(Irp->Flags & IRP_PAGING_IO) &&
 	    !FsRtlCheckLockForWriteAccess(&vp->lock, Irp)) {
@@ -6790,14 +6734,10 @@ do_read_job(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 	Irp->IoStatus.Status = Status;
 
-	dprintf("read %Iu bytes\n", Irp->IoStatus.Information);
-
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 	if (top_level)
 		IoSetTopLevelIrp(NULL);
-
-	dprintf("returning %08lx\n", Status);
 
 	return (Status);
 }
@@ -6822,14 +6762,10 @@ do_write_job(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 	Irp->IoStatus.Status = Status;
 
-	dprintf("wrote %Iu bytes\n", Irp->IoStatus.Information);
-
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 	if (top_level)
 		IoSetTopLevelIrp(NULL);
-
-	dprintf("returning %08lx\n", Status);
 
 	return (Status);
 }
