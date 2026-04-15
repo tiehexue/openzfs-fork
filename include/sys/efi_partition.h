@@ -387,6 +387,7 @@ _SYS_EFI_PARTITION_H int efi_alloc_and_read(int, struct dk_gpt **);
 #ifdef _WIN32
 _SYS_EFI_PARTITION_H int efi_alloc_and_read_flags(int, struct dk_gpt **,
     uint_t);
+_SYS_EFI_PARTITION_H void efi_set_fix_gpt(boolean_t);
 #endif
 _SYS_EFI_PARTITION_H int efi_write(int, struct dk_gpt *);
 _SYS_EFI_PARTITION_H int efi_rescan(int);

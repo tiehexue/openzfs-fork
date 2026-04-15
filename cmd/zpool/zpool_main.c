@@ -79,6 +79,9 @@
 #include "zfs_valstr.h"
 
 #include "statcommon.h"
+#ifdef _WIN32
+#include <sys/efi_partition.h>
+#endif
 
 libzfs_handle_t *g_zfs;
 
@@ -4201,6 +4204,7 @@ zpool_do_checkpoint(int argc, char **argv)
 }
 
 #define	CHECKPOINT_OPT	1024
+#define	FIX_GPT_OPT	1025
 
 /*
  * zpool prefetch [-t <type>] <pool>
@@ -4361,6 +4365,9 @@ zpool_do_import(int argc, char **argv)
 
 	struct option long_options[] = {
 		{"rewind-to-checkpoint", no_argument, NULL, CHECKPOINT_OPT},
+#ifdef _WIN32
+		{"fix-gpt", no_argument, NULL, FIX_GPT_OPT},
+#endif
 		{0, 0, 0, 0}
 	};
 
@@ -4448,6 +4455,11 @@ zpool_do_import(int argc, char **argv)
 		case CHECKPOINT_OPT:
 			flags |= ZFS_IMPORT_CHECKPOINT;
 			break;
+#ifdef _WIN32
+		case FIX_GPT_OPT:
+			efi_set_fix_gpt(B_TRUE);
+			break;
+#endif
 		case ':':
 			(void) fprintf(stderr, gettext("missing argument for "
 			    "'%c' option\n"), optopt);

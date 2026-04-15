@@ -85,6 +85,18 @@ int efi_debug = 0;
 static int efi_read(int, struct dk_gpt *);
 
 /*
+ * When set, efi_read() will correct a GPT with NumPartitions < 128 in-place
+ * and write the fixed header back to disk.  Set via efi_set_fix_gpt().
+ */
+static boolean_t efi_fix_gpt = B_FALSE;
+
+void
+efi_set_fix_gpt(boolean_t val)
+{
+	efi_fix_gpt = val;
+}
+
+/*
  * Return a 32-bit CRC of the contents of the buffer.  Pre-and-post
  * one's conditioning will be handled by crc32() internally.
  */
@@ -974,6 +986,118 @@ efi_read(int fd, struct dk_gpt *vtoc)
 	vtoc->efi_last_u_lba = LE_64(efi->efi_gpt_LastUsableLBA);
 	vtoc->efi_altern_lba = LE_64(efi->efi_gpt_AlternateLBA);
 	UUID_LE_CONVERT(vtoc->efi_disk_uguid, efi->efi_gpt_DiskGUID);
+
+	/*
+	 * OpenZFS/Solaris historically creates GPT headers with
+	 * NumPartitions=9.  Windows requires NumPartitions=128 (the UEFI
+	 * minimum) and will not create HarddiskXPartitionY devices without
+	 * it.  Warn the user and, if --fix-gpt was requested, correct both
+	 * the primary and backup GPT headers in-place.
+	 *
+	 * The partition entry array is always laid out to cover
+	 * EFI_MIN_ARRAY_SIZE (16 KB = 128 entries) on disk, so correcting
+	 * the header field is safe: entries 9-127 are already zeroed.
+	 */
+	uint_t efi_nparts_min =
+	    (uint_t)(EFI_MIN_ARRAY_SIZE / sizeof (efi_gpe_t));
+	if (vtoc->efi_nparts < efi_nparts_min) {
+		(void) fprintf(stderr,
+		    "Warning: disk GPT has NumPartitions=%u (expected %u). "
+		    "Windows may not create partition devices for this disk.\n"
+		    "Use 'zpool import --fix-gpt' to correct.\n",
+		    vtoc->efi_nparts, efi_nparts_min);
+
+		if (efi_fix_gpt) {
+			uint32_t new_nparts = efi_nparts_min;
+			uint32_t array_crc;
+			dk_efi_t fix_ioc;
+			DWORD bytesReturned;
+
+			/* Update primary header nparts and recompute CRCs */
+			efi->efi_gpt_NumberOfPartitionEntries =
+			    LE_32(new_nparts);
+			array_crc = efi_crc32((unsigned char *)efi_parts,
+			    new_nparts * (int)sizeof (efi_gpe_t));
+			efi->efi_gpt_PartitionEntryArrayCRC32 =
+			    LE_32(array_crc);
+			efi->efi_gpt_HeaderCRC32 = 0;
+			efi->efi_gpt_HeaderCRC32 =
+			    LE_32(efi_crc32((unsigned char *)efi,
+			    LE_32(efi->efi_gpt_HeaderSize)));
+
+			/* Write primary GPT header + array starting at LBA 1 */
+			fix_ioc.dki_lba = 1;
+			fix_ioc.dki_length = label_len;
+			fix_ioc.dki_data = efi;
+
+			if (efi_ioctl(fd, DKIOCSETEFI, &fix_ioc) != 0) {
+				(void) fprintf(stderr,
+				    "Warning: failed to write corrected "
+				    "primary GPT: errno %d\n", errno);
+			} else {
+				/*
+				 * Fix the backup GPT header.  Read it, update
+				 * nparts and CRCs (the backup partition array
+				 * on disk is already correct), write it back.
+				 */
+				efi_gpt_t *backup;
+				dk_efi_t bak_ioc;
+
+				backup = umem_alloc_aligned(
+				    disk_info.dki_lbsize,
+				    disk_info.dki_lbsize, UMEM_DEFAULT);
+				if (backup != NULL) {
+					bak_ioc.dki_lba =
+					    vtoc->efi_altern_lba;
+					bak_ioc.dki_length =
+					    disk_info.dki_lbsize;
+					bak_ioc.dki_data = backup;
+
+					if (efi_ioctl(fd, DKIOCGETEFI,
+					    &bak_ioc) == 0) {
+					backup->
+					    efi_gpt_NumberOfPartitionEntries =
+					    LE_32(new_nparts);
+					backup->
+					    efi_gpt_PartitionEntryArrayCRC32 =
+					    LE_32(array_crc);
+					backup->efi_gpt_HeaderCRC32 =
+					    0;
+					backup->efi_gpt_HeaderCRC32 =
+					    LE_32(efi_crc32(
+					    (unsigned char *)backup,
+					    LE_32(backup->
+					    efi_gpt_HeaderSize)));
+					if (efi_ioctl(fd,
+					    DKIOCSETEFI,
+					    &bak_ioc) != 0 &&
+					    efi_debug) {
+						(void) fprintf(stderr,
+						    "Warning: failed "
+						    "to write corrected"
+						    " backup GPT: "
+						    "errno %d\n",
+						    errno);
+					}
+					}
+					umem_free_aligned(backup,
+					    disk_info.dki_lbsize);
+				}
+
+				/* Notify Windows of partition table change */
+				DeviceIoControl(fd,
+				    IOCTL_DISK_UPDATE_PROPERTIES,
+				    NULL, 0, NULL, 0,
+				    &bytesReturned, NULL);
+
+				(void) fprintf(stderr,
+				    "GPT corrected: NumPartitions set to %u.\n",
+				    new_nparts);
+			}
+
+			vtoc->efi_nparts = new_nparts;
+		}
+	}
 
 	/*
 	 * If the array the user passed in is too small, set the length
