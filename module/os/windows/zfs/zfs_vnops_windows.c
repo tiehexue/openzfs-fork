@@ -435,6 +435,47 @@ zfs_couplefileobject(vnode_t *vp, vnode_t *dvp, FILE_OBJECT *fileobject,
 		    &zccb->z_name_len,
 		    &zccb->z_name_offset,
 		    stream);
+
+		/*
+		 * For hardlinks (z_links > 1), zfs_build_path resolves the
+		 * inode's primary name via ZAP lookup, which may differ from
+		 * the name the caller used to open this file.  Override
+		 * z_name_cache with the verbatim FileObject->FileName so that
+		 * FileNameInformation, FileNormalizedNameInformation, and
+		 * directory-change notifications all reflect the opened link
+		 * name rather than an arbitrary alternate name for the inode.
+		 *
+		 * Streams are excluded: stream opens use a synthesised name
+		 * and the caller-supplied FileObject->FileName includes the
+		 * ":stream:$DATA" suffix, which needs separate handling.
+		 */
+		if (zp != NULL && zp->z_links > 1 && stream == NULL &&
+		    fileobject->FileName.Buffer != NULL &&
+		    fileobject->FileName.Length > 0) {
+			ULONG bytes_needed =
+			    (fileobject->FileName.Length / sizeof (WCHAR))
+			    * 4 + 1;
+			char *fo_name = kmem_alloc(bytes_needed, KM_SLEEP);
+			ULONG fo_len = 0;
+			NTSTATUS ns = RtlUnicodeToUTF8N(fo_name,
+			    bytes_needed - 1, &fo_len,
+			    fileobject->FileName.Buffer,
+			    fileobject->FileName.Length);
+			if (NT_SUCCESS(ns) || ns == STATUS_SOME_NOT_MAPPED) {
+				fo_name[fo_len] = '\0';
+				if (zccb->z_name_cache != NULL)
+					kmem_free(zccb->z_name_cache,
+					    zccb->z_name_len);
+				zccb->z_name_cache = fo_name;
+				zccb->z_name_len = bytes_needed;
+				/* offset past the last backslash */
+				char *last_bs = strrchr(fo_name, '\\');
+				zccb->z_name_offset = last_bs ?
+				    (uint32_t)(last_bs - fo_name + 1) : 0;
+			} else {
+				kmem_free(fo_name, bytes_needed);
+			}
+		}
 	}
 
 	// Debug, remember what Vpb we returned
@@ -1297,6 +1338,7 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
 	return (0);
 }
 
+
 /*
  * In POSIX, the vnop_lookup() would return with iocount still held
  * for the caller to issue VN_RELE() on when done.
@@ -2040,6 +2082,7 @@ zfs_vnop_lookup_impl(PIRP Irp, PIO_STACK_LOCATION IrpSp, mount_t *zmo,
 			xoap->xoa_case_sensitive_dir = 1;
 			XVA_SET_REQ(xvap, XAT_CASESENSITIVEDIR);
 		}
+
 		ASSERT(strchr(finalname, '\\') == NULL);
 		error = zfs_mkdir(VTOZ(dvp), finalname, vap, &zp, mkdir_cr,
 		    flags, NULL, NULL);
@@ -5410,7 +5453,22 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 	WCHAR Fat8QMdot3QM[12] = { DOS_QM, DOS_QM, DOS_QM, DOS_QM,
 	    DOS_QM, DOS_QM, DOS_QM, DOS_QM, L'.', DOS_QM, DOS_QM, DOS_QM };
 
-	/* All these cases mean we should list all */
+	/*
+	 * FileName is only meaningful on the first call (initial == TRUE)
+	 * or when SL_RESTART_SCAN is set.  On subsequent FindNextFile calls
+	 * (FileName == NULL / empty / trivial wildcard), the existing
+	 * searchname must NOT be cleared — clearing it strips the filter
+	 * and causes entries that do not match the original pattern to leak
+	 * into the output.
+	 *
+	 * Example: `dir "New Document (2).txt"` (non-wildcard) correctly
+	 * returns one entry on the first call, but without this fix the
+	 * second call (FindNextFile, FileName=NULL) wiped the searchname and
+	 * returned all remaining directory entries unfiltered.
+	 *
+	 * We still fall through here so the initial/dir_eof checks below
+	 * work normally.
+	 */
 	if ((IrpSp->Parameters.QueryDirectory.FileName == NULL) ||
 	    (IrpSp->Parameters.QueryDirectory.FileName->Length == 0) ||
 	    (IrpSp->Parameters.QueryDirectory.FileName->Buffer == NULL) ||
@@ -5423,20 +5481,21 @@ query_directory_FileFullDirectoryInformation(PDEVICE_OBJECT DeviceObject,
 	    Fat8QMdot3QM, /* "????????.???" */
 	    12 * sizeof (WCHAR))))) {
 
-		if (zccb->searchname.Buffer != NULL)
-			kmem_free(zccb->searchname.Buffer,
-			    zccb->searchname.MaximumLength);
-		zccb->searchname.Buffer = NULL;
+	/* keep existing searchname — continuation of the current scan */
 
 	} else if (IrpSp->Parameters.QueryDirectory.FileName &&
 	    IrpSp->Parameters.QueryDirectory.FileName->Buffer) {
 
-		// Save the pattern in the zccb, as it is only given in the
-		// first call (citation needed)
+		/*
+		 * FileName is provided and non-trivial: save it as the search
+		 * pattern.  Per spec, FileName is only honoured on the first
+		 * call; subsequent calls with a non-wildcard FileName (and no
+		 * SL_RESTART_SCAN) return STATUS_NO_MORE_FILES immediately
+		 * because a specific name can only match once.
+		 */
 		zccb->ContainsWildCards = FsRtlDoesNameContainWildCards(
 		    IrpSp->Parameters.QueryDirectory.FileName);
 
-		/* why? */
 		if (!zccb->ContainsWildCards && !initial) {
 			UnMapUserBuffer(mdl);
 			return (STATUS_NO_MORE_FILES);
@@ -6039,6 +6098,13 @@ fs_read(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	}
 #endif
 
+	/*
+	 * For async (overlapped) NOCACHE reads, fs_read_impl returns
+	 * STATUS_PENDING immediately (see the !wait check in the NOCACHE
+	 * path), which lets the calling thread post all Q>1 IRPs before any
+	 * block, achieving true concurrent I/O via CriticalWorkQueue.
+	 * For synchronous or paging reads, wait=TRUE is correct.
+	 */
 	wait = IoIsOperationSynchronous(Irp);
 
 	if (!(Irp->Flags & IRP_PAGING_IO))
@@ -6096,13 +6162,6 @@ end:
 		break;
 	}
 
-	/*
-	 * For async (overlapped) NOCACHE reads, fs_read_impl returns
-	 * STATUS_PENDING immediately (see the !wait check in the NOCACHE
-	 * path), which lets the calling thread post all Q>1 IRPs before any
-	 * block, achieving true concurrent I/O via CriticalWorkQueue.
-	 * For synchronous or paging reads, wait=TRUE is correct.
-	 */
 	Irp->IoStatus.Status = Status;
 
 	VN_RELE(vp);
@@ -6193,6 +6252,18 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		CcPurgeCacheSection(FileObject->SectionObjectPointer,
 		    &offset, *length, FALSE);
+
+		/*
+		 * Release PagingIoResource immediately after the flush/purge.
+		 * The cache section is now clean; there is no coherency reason
+		 * to hold PagingIoResource across the ZFS write (which includes
+		 * a potentially multi-second TXG sync wait).  Holding it that
+		 * long serialises all concurrent no-cache writers on the same
+		 * file, limiting write parallelism to one writer per TXG cycle.
+		 * paging_lock is intentionally left FALSE so end: does not
+		 * attempt a second release.
+		 */
+		ExReleaseResourceLite(vp->FileHeader.PagingIoResource);
 	}
 
 	pagefile = vp->FileHeader.Flags2 & FSRTL_FLAG2_IS_PAGING_FILE &&
@@ -6252,18 +6323,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		}
 	}
 
-
-		/*
-		 * Release PagingIoResource immediately after the flush/purge.
-		 * The cache section is now clean; there is no coherency reason
-		 * to hold PagingIoResource across the ZFS write (which includes
-		 * a potentially multi-second TXG sync wait).  Holding it that
-		 * long serialises all concurrent no-cache writers on the same
-		 * file, limiting write parallelism to one writer per TXG cycle.
-		 * paging_lock is intentionally left FALSE so end: does not
-		 * attempt a second release.
-		 */
-		ExReleaseResourceLite(vp->FileHeader.PagingIoResource);
 	newlength = zp->z_size;
 
 	if (zp->z_unlinked)
@@ -6664,6 +6723,12 @@ fs_write(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	mount_t *zmo = DeviceObject->DeviceExtension;
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	/*
+	 * For async (overlapped) NOCACHE writes, zfs_write_wrap returns
+	 * STATUS_PENDING immediately (see the !wait && no_cache check),
+	 * enabling concurrent Q>1 writes via CriticalWorkQueue.
+	 * For synchronous writes or paging IO, wait=TRUE is correct.
+	 */
 	boolean_t wait = fileObject ? IoIsOperationSynchronous(Irp) : TRUE;
 
 	/* No returns from here */
@@ -6723,12 +6788,6 @@ fs_write(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	zfs_exit(zfsvfs, FTAG);
 
 	// dprintf("Name: %wZ offset 0x%llx len 0x%lx mdl %p System %p\n",
-	/*
-	 * For async (overlapped) NOCACHE writes, zfs_write_wrap returns
-	 * STATUS_PENDING immediately (see the !wait && no_cache check),
-	 * enabling concurrent Q>1 writes via CriticalWorkQueue.
-	 * For synchronous writes or paging IO, wait=TRUE is correct.
-	 */
 	// &fileObject->FileName, byteOffset.QuadPart, bufferLength,
 	// Irp->MdlAddress, Irp->AssociatedIrp.SystemBuffer);
 
@@ -7369,6 +7428,7 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	boolean_t need_flush = B_FALSE;
 	boolean_t need_purge = B_FALSE;
 	boolean_t need_cache_uninit = B_FALSE;
+	boolean_t need_hardlink_delete = B_FALSE;
 	boolean_t deleted = B_FALSE;
 
 	if (zmo->type != MOUNT_TYPE_VCB) {
@@ -7439,7 +7499,19 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 	// Promote to global delete
 	if (zccb && zccb->deleteonclose) {
-		vnode_setunlink(vp, DELETE_PENDING|DELETE_HIDDEN);
+		if (zp != NULL && zp->z_links > 1) {
+			/*
+			 * Hardlink: only this specific directory entry is
+			 * being removed; the inode survives under its other
+			 * names.  Do NOT mark the vnode DELETE_HIDDEN —
+			 * that flag is vnode-wide and would hide every name
+			 * for this inode from directory listings.  Instead,
+			 * remove just the one name after the lock drops.
+			 */
+			need_hardlink_delete = B_TRUE;
+		} else {
+			vnode_setunlink(vp, DELETE_PENDING|DELETE_HIDDEN);
+		}
 		zccb->deleteonclose = 0;
 	}
 
@@ -7499,26 +7571,93 @@ zfs_fileobject_cleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		CcUninitializeCacheMap(FileObject, NULL, NULL);
 	}
 
+	/*
+	 * Hardlink deletion: remove only the opened directory entry.
+	 * Unlike the single-link delete_entry() path, we must NOT zero
+	 * vp->FileHeader sizes or call CcSetFileSizes — the inode is
+	 * still alive under its other names and those handles must
+	 * continue to work normally.
+	 *
+	 * zccb->z_name_cache is per-file-object (not per-vnode) and was
+	 * set at open time to the exact name used to open this link, so
+	 * z_name_cache + z_name_offset gives the correct component name
+	 * to pass to zfs_remove without any further conversion.
+	 */
+	if (need_hardlink_delete) {
+		zfsvfs_t *zfsvfs = vfs_fsprivate(fzmo);
+
+		if (zccb && zccb->z_name_cache != NULL && dvp != NULL) {
+			char *hl_name =
+			    zccb->z_name_cache + zccb->z_name_offset;
+			dprintf("%s: hardlink remove '%s'\n",
+			    __func__, hl_name);
+			zfs_send_notify(zfsvfs, zccb->z_name_cache,
+			    zccb->z_name_offset,
+			    FILE_NOTIFY_CHANGE_FILE_NAME,
+			    FILE_ACTION_REMOVED);
+			VERIFY0(VN_HOLD(dvp));
+			int hl_err = zfs_remove(VTOZ(dvp),
+			    hl_name, NULL, 0);
+			VN_RELE(dvp);
+			dvp = NULL;
+			if (hl_err != 0)
+				dprintf("%s: hardlink remove failed %d\n",
+				    __func__, hl_err);
+		} else {
+			dprintf("%s: hardlink delete: no zccb/dvp\n",
+			    __func__);
+		}
+	}
+
 	if (need_delete) {
 		zfsvfs_t *zfsvfs = vfs_fsprivate(fzmo);
 
 		if (zccb && zccb->z_name_cache != NULL) {
+			/*
+			 * Use the filename from the FileObject (the original
+			 * open path) rather than zccb->z_name_cache (the
+			 * inode's primary name).  For hard links, z_name_cache
+			 * reflects whichever name was first resolved for this
+			 * inode (e.g. 'file2.txt') and not the link name that
+			 * was actually opened for deletion (e.g. 'file3.txt').
+			 * Sending the wrong name in FILE_ACTION_REMOVED
+			 * misleads Explorer + other directory-watch consumers.
+			 */
+			char _notify_buf[MAXPATHLEN];
+			char *notify_name = zccb->z_name_cache;
+			int notify_offset = zccb->z_name_offset;
+
+			if (FileObject->FileName.Buffer != NULL &&
+			    FileObject->FileName.Length > 0) {
+				ULONG outlen = 0;
+				NTSTATUS ns = RtlUnicodeToUTF8N(_notify_buf,
+				    MAXPATHLEN - 1, &outlen,
+				    FileObject->FileName.Buffer,
+				    FileObject->FileName.Length);
+				if (NT_SUCCESS(ns) ||
+				    ns == STATUS_SOME_NOT_MAPPED) {
+					_notify_buf[outlen] = '\0';
+					notify_name = _notify_buf;
+					notify_offset = 0;
+				}
+			}
+
 			if (vnode_isdir(vp)) {
 				dprintf("DIR: FileDelete '%s' name '%s'\n",
-				    zccb->z_name_cache,
-				    &zccb->z_name_cache[zccb->z_name_offset]);
+				    notify_name,
+				    notify_name + notify_offset);
 				zfs_send_notify(zfsvfs,
-				    zccb->z_name_cache,
-				    zccb->z_name_offset,
+				    notify_name,
+				    notify_offset,
 				    FILE_NOTIFY_CHANGE_DIR_NAME,
 				    FILE_ACTION_REMOVED);
 			} else {
 				dprintf("FILE: FileDelete '%s' name '%s'\n",
-				    zccb->z_name_cache,
-				    &zccb->z_name_cache[zccb->z_name_offset]);
+				    notify_name,
+				    notify_name + notify_offset);
 				zfs_send_notify(zfsvfs,
-				    zccb->z_name_cache,
-				    zccb->z_name_offset,
+				    notify_name,
+				    notify_offset,
 				    FILE_NOTIFY_CHANGE_FILE_NAME,
 				    FILE_ACTION_REMOVED);
 			}
