@@ -140,23 +140,7 @@ extern NTSTATUS zfsdev_release(dev_t dev, PIRP Irp);
 extern int	zfs_vnop_recycle(znode_t *zp, int force);
 extern uint64_t zfs_blksz(znode_t *zp);
 
-inline static uint64_t
-allocationsize(struct znode *zp)
-{
-	if (S_ISDIR(zp->z_mode))
-		return (0ULL);
-
-	if (zp->z_size == 0) {
-		// Did they prealloc?
-		struct vnode *vp = ZTOV(zp);
-		if ((vp != NULL) &&
-		    (vp->FileHeader.AllocationSize.QuadPart > 0ULL))
-			return (vp->FileHeader.AllocationSize.QuadPart);
-		return (0ULL);
-	}
-
-	return (P2ROUNDUP(zp->z_size, zfs_blksz(zp)));
-}
+extern uint64_t allocationsize(struct znode *zp);
 
 extern int	zfs_vnop_mount(PDEVICE_OBJECT DiskDevice, PIRP Irp,
     PIO_STACK_LOCATION IrpSp);

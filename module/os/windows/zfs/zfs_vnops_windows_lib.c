@@ -4853,8 +4853,6 @@ NTSTATUS
 file_compression_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp, FILE_COMPRESSION_INFORMATION *fci)
 {
-	dprintf("   %s\n", __func__);
-
 	if (IrpSp->Parameters.QueryFile.Length <
 	    sizeof (FILE_COMPRESSION_INFORMATION)) {
 		Irp->IoStatus.Information =
@@ -4862,26 +4860,56 @@ file_compression_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
-		struct vnode *vp = IrpSp->FileObject->FsContext;
-		if (VN_HOLD(vp) == 0) {
-			znode_t *zp = VTOZ(vp);
-			zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
 
-			memset(fci, 0, sizeof (FILE_COMPRESSION_INFORMATION));
+	struct vnode *vp = IrpSp->FileObject->FsContext;
+	if (VN_HOLD(vp) != 0)
+		return (STATUS_INVALID_PARAMETER);
 
-			// Deal with ads here, and send adsdata.length
-			if (vnode_isdir(vp))
-				fci->CompressedFileSize.QuadPart = zp->z_size;
+	znode_t *zp = VTOZ(vp);
+	memset(fci, 0, sizeof (FILE_COMPRESSION_INFORMATION));
 
-			VN_RELE(vp);
-		}
-		Irp->IoStatus.Information =
-		    sizeof (FILE_COMPRESSION_INFORMATION);
-		return (STATUS_SUCCESS);
+	dmu_object_info_t doi;
+	boolean_t compressed = B_FALSE;
+	uint64_t phys_bytes = 0;
+
+	objset_t *os = zp->z_zfsvfs->z_os;
+	boolean_t ds_compressed = (os != NULL &&
+	    os->os_compress != ZIO_COMPRESS_OFF &&
+	    os->os_compress != ZIO_COMPRESS_EMPTY);
+
+	if (zp->z_sa_hdl != NULL) {
+
+		dmu_object_info_from_db(sa_get_db(zp->z_sa_hdl), &doi);
+		compressed = ds_compressed;
+		phys_bytes = doi.doi_physical_blocks_512 * 512ULL;
+		fci->CompressedFileSize.QuadPart =
+		    (int64_t)(compressed ? phys_bytes : zp->z_size);
+		fci->CompressionFormat = compressed ?
+		    COMPRESSION_FORMAT_DEFAULT : COMPRESSION_FORMAT_NONE;
+		/*
+		 * CompressionUnitShift: log2 of the compression unit size.
+		 * highbit64 returns 1-based position of highest set bit, so
+		 * subtract 1 to get log2.
+		 */
+		fci->CompressionUnitShift =
+		    (UCHAR)(highbit64(doi.doi_data_block_size) - 1);
+		fci->ChunkShift = fci->CompressionUnitShift;
+		fci->ClusterShift = fci->CompressionUnitShift;
+	} else {
+		/* Fallback: no object info, report uncompressed */
+		fci->CompressedFileSize.QuadPart = (int64_t)zp->z_size;
 	}
 
-	return (STATUS_INVALID_PARAMETER);
+	dprintf("%s: phys=%llu logical=%llu fmt=%u\n", __func__,
+	    (unsigned long long)phys_bytes,
+	    (unsigned long long)zp->z_size, fci->CompressionFormat);
+
+	VN_RELE(vp);
+	Irp->IoStatus.Information = sizeof (FILE_COMPRESSION_INFORMATION);
+	return (STATUS_SUCCESS);
 }
 
 uint64_t
@@ -4900,6 +4928,23 @@ zfs_blksz(znode_t *zp)
 	if (zp->z_zfsvfs->z_max_blksz)
 		return (zp->z_zfsvfs->z_max_blksz);
 	return (512ULL);
+}
+
+uint64_t
+allocationsize(znode_t *zp)
+{
+	if (S_ISDIR(zp->z_mode))
+		return (0ULL);
+
+	if (zp->z_size == 0) {
+		struct vnode *vp = ZTOV(zp);
+		if (vp != NULL &&
+		    vp->FileHeader.AllocationSize.QuadPart > 0ULL)
+			return (vp->FileHeader.AllocationSize.QuadPart);
+		return (0ULL);
+	}
+
+	return (P2ROUNDUP(zp->z_size, zfs_blksz(zp)));
 }
 
 void
