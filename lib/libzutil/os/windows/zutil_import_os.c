@@ -594,7 +594,8 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 
 			error = asprintf(&slice->rn_name,
 			    "\\\\?\\Harddisk%uPartition%u",
-			    diskNumber.DeviceNumber, i);
+			    diskNumber.DeviceNumber,
+			    partitions->PartitionEntry[i].PartitionNumber);
 
 			if (error == -1) {
 				free(slice);
@@ -606,7 +607,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			slice->rn_avl = *slice_cache;
 			slice->rn_hdl = hdl;
 			slice->rn_labelpaths = B_TRUE;
-			slice->rn_order = IMPORT_ORDER_PREFERRED_2;
+			slice->rn_order = IMPORT_ORDER_PREFERRED_1;
 
 			pthread_mutex_lock(lock);
 			if (avl_find(*slice_cache, slice, &where)) {
@@ -744,7 +745,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 				slice->rn_hdl = hdl;
 				slice->rn_labelpaths = B_TRUE;
 				slice->rn_order =
-				    IMPORT_ORDER_SCAN_OFFSET + i;
+				    IMPORT_ORDER_DEFAULT;
 
 				pthread_mutex_lock(lock);
 				if (avl_find(*slice_cache, slice, &where)) {
@@ -1076,13 +1077,39 @@ update_vdev_config_dev_strs(nvlist_t *nv)
 	if (ret == 0) {
 		char *vdev_path;
 
-		if (wholedisk)
-			asprintf(&vdev_path, "/dev/physicaldrive%lu",
-			    deviceNumber.DeviceNumber);
-		else
-			asprintf(&vdev_path, "/dev/Harddisk%luPartition%lu",
-			    deviceNumber.DeviceNumber,
-			    deviceNumber.PartitionNumber);
+		if (path[0] == '#') {
+			/*
+			 * Already offset-encoded (#offset#len#devpath).
+			 * Use a human-readable path; the encoded path goes
+			 * into physpath so the kernel uses the right offset.
+			 */
+			if (wholedisk)
+				asprintf(&vdev_path, "/dev/physicaldrive%lu",
+				    deviceNumber.DeviceNumber);
+			else
+				asprintf(&vdev_path,
+				    "/dev/Harddisk%luPartition%lu",
+				    deviceNumber.DeviceNumber,
+				    deviceNumber.PartitionNumber);
+		} else if (deviceNumber.PartitionNumber > 0) {
+			/*
+			 * Partition device (\\?\HarddiskXPartitionY).
+			 * Store with forward slashes; the kernel converts
+			 * //?/ back to \??\ and opens it directly.
+			 * No physpath offset hack needed.
+			 */
+			vdev_path = strdup(end);
+			zfs_slashes(vdev_path);
+		} else {
+			if (wholedisk)
+				asprintf(&vdev_path, "/dev/physicaldrive%lu",
+				    deviceNumber.DeviceNumber);
+			else
+				asprintf(&vdev_path,
+				    "/dev/Harddisk%luPartition%lu",
+				    deviceNumber.DeviceNumber,
+				    deviceNumber.PartitionNumber);
+		}
 
 		fprintf(stderr, "setting path here '%s'\r\n", vdev_path);
 		fflush(stderr);

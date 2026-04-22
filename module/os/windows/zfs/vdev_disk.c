@@ -46,10 +46,11 @@
 wchar_t zfs_vdev_protection_filter[ZFS_MODULE_STRMAX] = { L"\0" };
 
 static void vdev_disk_close(vdev_t *);
+static void vdev_disk_io_start_done(__in PVOID pDummy, __in PVOID pWkParms);
 
 extern void UnlockAndFreeMdl(PMDL);
 
-_Atomic uint64_t spl_lowest_vdev_disk_stack_remaining = 0;
+extern _Atomic uint64_t spl_lowest_vdev_disk_stack_remaining = 0;
 
 static void
 vdev_disk_alloc(vdev_t *vd)
@@ -290,6 +291,14 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		FileName[1] = '?';
 	}
 
+	// Forward-slash form "//?/" stored for Unix compat; convert to "\??\"
+	if (strncmp("//?/", FileName, 4) == 0) {
+		FileName[0] = '\\';
+		FileName[1] = '?';
+		FileName[2] = '?';
+		FileName[3] = '\\';
+	}
+
 	dprintf("%s: opening '%s'\n", __func__, FileName);
 
 	ANSI_STRING AnsiFilespec;
@@ -326,15 +335,14 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	IO_STATUS_BLOCK iostatus;
 
 	ntstatus = ZwCreateFile(&dvd->vd_lh,
-	    spa_mode(spa) == SPA_MODE_READ ? GENERIC_READ | SYNCHRONIZE :
-	    GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+	    spa_mode(spa) == SPA_MODE_READ ? GENERIC_READ :
+	    GENERIC_READ | GENERIC_WRITE,
 	    &ObjectAttributes,
 	    &iostatus,
 	    0,
 	    FILE_ATTRIBUTE_NORMAL,
 	    FILE_SHARE_WRITE | FILE_SHARE_READ,
 	    FILE_OPEN,
-	    FILE_SYNCHRONOUS_IO_NONALERT |
 	    (spa_mode(spa) == SPA_MODE_READ ? 0 :
 	    FILE_NO_INTERMEDIATE_BUFFERING),
 	    NULL,
@@ -494,8 +502,12 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	ObReferenceObject(dvd->vd_DeviceObject);
 
 	// Make disk readonly and offline, so that users can't
-	// partition/format it.
-	if (vd->vdev_wholedisk)
+	// partition/format it.  Only do this for whole-disk vdevs opened
+	// via the #offset#len# path (dvd->vdev_win_offset > 0); for
+	// HarddiskNPartitionM paths the open handle is sufficient
+	// protection and disk_exclusive would offline the disk via partmgr,
+	// surprise-removing partition volume devices.
+	if (vd->vdev_wholedisk && dvd->vdev_win_offset > 0)
 		disk_exclusive(dvd->vd_ExclusiveObject, TRUE);
 	spa_strfree(vdev_path);
 
@@ -631,7 +643,7 @@ vdev_disk_close(vdev_t *vd)
 		dprintf("%s: \n", __func__);
 
 		// Undo disk readonly and offline.
-		if (vd->vdev_wholedisk)
+		if (vd->vdev_wholedisk && dvd->vdev_win_offset > 0)
 			disk_exclusive(dvd->vd_ExclusiveObject, FALSE);
 
 		// Release our holds
@@ -691,12 +703,42 @@ vdev_disk_ioctl_done(void *zio_arg, int error)
 	zio_interrupt(zio);
 }
 
+
+/*
+ * IO completion routine: runs at DPC/arbitrary-thread level.
+ * Cannot call mutex_enter() or any blocking primitive here.
+ * Queue a HyperCriticalWorkQueue work item so that vdev_disk_io_start_done()
+ * runs at PASSIVE_LEVEL where blocking is allowed.
+ *
+ * HyperCriticalWorkQueue is used (not CriticalWorkQueue) to prevent a
+ * thread-pool deadlock: do_write_job items occupy CriticalWorkQueue threads
+ * while blocking in txg_wait_synced_flags; the TXG sync thread is inside
+ * zio_wait waiting for THIS completion to fire.  If both share the same
+ * pool, no thread is ever free to run vdev_disk_io_start_done and the
+ * system deadlocks.  HyperCritical has its own reserved threads that
+ * cannot be starved by regular CriticalWorkQueue items.
+ */
+IO_COMPLETION_ROUTINE vdev_disk_io_intr;
+
+static NTSTATUS
+vdev_disk_io_intr(PDEVICE_OBJECT DeviceObject, PIRP irp, PVOID Context)
+{
+	zio_t *zio = (zio_t *)Context;
+
+	VERIFY3P(zio->windows.work_item, !=, NULL);
+	atomic_swap_32(&zio->windows.completion_called, 1);
+	IoQueueWorkItem(zio->windows.work_item,
+	    (PIO_WORKITEM_ROUTINE)vdev_disk_io_start_done,
+	    HyperCriticalWorkQueue, zio);
+	return (STATUS_MORE_PROCESSING_REQUIRED);
+}
+
 static void
 vdev_disk_io_start_done(__in PVOID pDummy, __in PVOID pWkParms)
 {
 	zio_t *zio = (zio_t *)pWkParms;
-	UNREFERENCED_PARAMETER(pDummy);
 
+	UNREFERENCED_PARAMETER(pDummy);
 	ASSERT(zio != NULL);
 
 	IoFreeWorkItem(zio->windows.work_item);
@@ -707,58 +749,18 @@ vdev_disk_io_start_done(__in PVOID pDummy, __in PVOID pWkParms)
 
 	UnlockAndFreeMdl(zio->windows.irp->MdlAddress);
 	IoFreeIrp(zio->windows.irp);
+	zio->windows.irp = NULL;
 
-	// Return abd buf
 	if (zio->io_type == ZIO_TYPE_READ) {
 		VERIFY3S(zio->io_abd->abd_size, >=, zio->io_size);
 		abd_return_buf_copy(zio->io_abd, zio->windows.b_addr,
 		    zio->io_size);
 	} else {
 		VERIFY3S(zio->io_abd->abd_size, >=, zio->io_size);
-		abd_return_buf(zio->io_abd, zio->windows.b_addr,
-		    zio->io_size);
+		abd_return_buf(zio->io_abd, zio->windows.b_addr, zio->io_size);
 	}
 
 	zio_delay_interrupt(zio);
-}
-
-/*
- * IO has finished callback, in Windows this is called as a different
- * IRQ level, so we can practically do nothing here. (Can't call mutex
- * locking, like from kmem_free())
- */
-IO_COMPLETION_ROUTINE vdev_disk_io_intr;
-
-static NTSTATUS
-vdev_disk_io_intr(PDEVICE_OBJECT DeviceObject, PIRP irp, PVOID Context)
-{
-	zio_t *zio = (zio_t *)Context;
-
-	ASSERT(zio != NULL);
-
-/*
- * Unfortunately:
- * Whatever thread happened to be running is "borrowed" to handle
- * the completion.
- * As about DPCs - in Windows, they are not bound to a thread,
- * KeGetCurrentThread is just nonsense in them.
- *
- * So, the whole Windows kernel framework just does not support the notion of
- * "current thread" in DPCs and thus completion routines.
- *
- * This means our call to "mutex_enter()" will "panic: lock against myself"
- * if that thread it "borrowed" is the actual owner thread.
- *
- * So schedule IoQueueWorkItem() to call the done function in a real context.
- */
-
-	VERIFY3P(zio->windows.work_item, !=, NULL);
-	atomic_swap_32(&zio->windows.completion_called, 1);
-
-	IoQueueWorkItem(zio->windows.work_item,
-	    (PIO_WORKITEM_ROUTINE)vdev_disk_io_start_done,
-	    DelayedWorkQueue, zio);
-	return (STATUS_MORE_PROCESSING_REQUIRED);
 }
 
 static void
@@ -874,8 +876,12 @@ vdev_disk_io_start(zio_t *zio)
 	offset.QuadPart = zio->io_offset + dvd->vdev_win_offset;
 
 	/*
-	 * Start IO -> IOCompletion callback 'vdev_disk_io_intr()'
-	 *  -> IoQueueWorkItem(DelayedWorkQueue) -> callback vdev_disk_io_done()
+	 * Async I/O path.
+	 *
+	 * Build the IRP, allocate a work item, and set a completion routine
+	 * that queues the work item on CriticalWorkQueue.
+	 * vdev_disk_io_start_done() runs at PASSIVE_LEVEL where blocking
+	 * primitives (abd_return_buf*, zio_delay_interrupt) are safe.
 	 */
 
 	zio->windows.work_item = IoAllocateWorkItem(dvd->vd_DeviceObject);
@@ -885,74 +891,49 @@ vdev_disk_io_start(zio_t *zio)
 		return;
 	}
 
-	if (zio->io_type == ZIO_TYPE_READ) {
+	void *b_addr;
+	if (zio->io_type == ZIO_TYPE_READ)
+		b_addr = abd_borrow_buf(zio->io_abd, zio->io_size);
+	else
+		b_addr = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
 
-		zio->windows.b_addr =
-		    abd_borrow_buf(zio->io_abd, zio->io_size);
+	zio->windows.b_addr = b_addr;
+	zio->windows.completion_called = 0;
 
-		irp = IoBuildAsynchronousFsdRequest(IRP_MJ_READ,
-		    dvd->vd_DeviceObject,
-		    zio->windows.b_addr,
-		    (ULONG)zio->io_size,
-		    &offset,
-		    &zio->windows.IoStatus);
+	ULONG irp_major = (zio->io_type == ZIO_TYPE_READ) ?
+	    IRP_MJ_READ : IRP_MJ_WRITE;
 
-	} else {
-		zio->windows.b_addr =
-		    abd_borrow_buf_copy(zio->io_abd, zio->io_size);
-
-		irp = IoBuildAsynchronousFsdRequest(IRP_MJ_WRITE,
-		    dvd->vd_DeviceObject,
-		    zio->windows.b_addr,
-		    (ULONG)zio->io_size,
-		    &offset,
-		    &zio->windows.IoStatus);
-	}
+	irp = IoBuildAsynchronousFsdRequest(irp_major,
+	    dvd->vd_DeviceObject,
+	    b_addr,
+	    (ULONG)zio->io_size,
+	    &offset,
+	    &zio->windows.IoStatus);
 
 	if (!irp) {
-
-		if (zio->io_type == ZIO_TYPE_READ) {
-			abd_return_buf_copy(zio->io_abd, zio->windows.b_addr,
-			    zio->io_size);
-		} else {
-			abd_return_buf(zio->io_abd, zio->windows.b_addr,
-			    zio->io_size);
-		}
-
 		IoFreeWorkItem(zio->windows.work_item);
+		zio->windows.work_item = NULL;
+		if (zio->io_type == ZIO_TYPE_READ)
+			abd_return_buf_copy(zio->io_abd, b_addr, zio->io_size);
+		else
+			abd_return_buf(zio->io_abd, b_addr, zio->io_size);
 		zio->io_error = EIO;
 		zio_interrupt(zio);
 		return;
 	}
 
 	zio->windows.irp = irp;
-	zio->windows.completion_called = 0;
 
 	irpStack = IoGetNextIrpStackLocation(irp);
-
 	irpStack->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
 	irpStack->FileObject = dvd->vd_FileObject;
 
 	IoSetCompletionRoutine(irp,
 	    vdev_disk_io_intr,
-	    zio,   // "Context" in vdev_disk_io_intr()
-	    TRUE,  // On Success
-	    TRUE,  // On Error
-	    TRUE); // On Cancel
+	    zio,
+	    TRUE, TRUE, TRUE);
 
-	NTSTATUS Status;
-	Status = IoCallDriver(dvd->vd_DeviceObject, irp);
-
-	// IO is in progress asynchronously...
-	if (Status == STATUS_PENDING)
-		return;
-
-	// IO completed synchronously or failed to start
-	// we clean up manually, assuming the completion
-	// callback was not called.
-	membar_consumer();
-	if (!atomic_load_32(&zio->windows.completion_called))
-		vdev_disk_io_start_done(NULL, zio);
+	(void) IoCallDriver(dvd->vd_DeviceObject, irp);
 }
 
 static void
