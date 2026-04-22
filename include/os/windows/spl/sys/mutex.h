@@ -79,6 +79,13 @@ typedef struct kmutex {
 	 */
 	KSPIN_LOCK	m_destroy_lock;
 	unsigned int	m_initialised;
+	/*
+	 * Fast-path optimization: m_waiters is incremented by threads that
+	 * failed the CAS in mutex_enter and are about to sleep on m_lock.
+	 * mutex_exit only acquires m_destroy_lock and calls KeSetEvent when
+	 * this is non-zero, making uncontested exit a near-free operation.
+	 */
+	volatile uint32_t m_waiters;
 } kmutex_t;
 
 #define	MUTEX_HELD(x)		(mutex_owned(x))
