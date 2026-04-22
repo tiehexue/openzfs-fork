@@ -6043,8 +6043,6 @@ fs_read(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	if (!(Irp->Flags & IRP_PAGING_IO))
 		FsRtlCheckOplock(vp_oplock(vp), Irp, NULL, NULL, NULL);
-	else
-		wait = TRUE;
 	// Don't offload jobs when doing paging IO - otherwise this can lead to
 	// deadlocks in CcCopyRead.
 
@@ -6098,6 +6096,13 @@ end:
 		break;
 	}
 
+	/*
+	 * For async (overlapped) NOCACHE reads, fs_read_impl returns
+	 * STATUS_PENDING immediately (see the !wait check in the NOCACHE
+	 * path), which lets the calling thread post all Q>1 IRPs before any
+	 * block, achieving true concurrent I/O via CriticalWorkQueue.
+	 * For synchronous or paging reads, wait=TRUE is correct.
+	 */
 	Irp->IoStatus.Status = Status;
 
 	VN_RELE(vp);
@@ -6186,8 +6191,6 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			return (iosb.Status);
 		}
 
-		paging_lock = TRUE;
-
 		CcPurgeCacheSection(FileObject->SectionObjectPointer,
 		    &offset, *length, FALSE);
 	}
@@ -6249,6 +6252,18 @@ zfs_write_wrap(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		}
 	}
 
+
+		/*
+		 * Release PagingIoResource immediately after the flush/purge.
+		 * The cache section is now clean; there is no coherency reason
+		 * to hold PagingIoResource across the ZFS write (which includes
+		 * a potentially multi-second TXG sync wait).  Holding it that
+		 * long serialises all concurrent no-cache writers on the same
+		 * file, limiting write parallelism to one writer per TXG cycle.
+		 * paging_lock is intentionally left FALSE so end: does not
+		 * attempt a second release.
+		 */
+		ExReleaseResourceLite(vp->FileHeader.PagingIoResource);
 	newlength = zp->z_size;
 
 	if (zp->z_unlinked)
@@ -6708,6 +6723,12 @@ fs_write(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	zfs_exit(zfsvfs, FTAG);
 
 	// dprintf("Name: %wZ offset 0x%llx len 0x%lx mdl %p System %p\n",
+	/*
+	 * For async (overlapped) NOCACHE writes, zfs_write_wrap returns
+	 * STATUS_PENDING immediately (see the !wait && no_cache check),
+	 * enabling concurrent Q>1 writes via CriticalWorkQueue.
+	 * For synchronous writes or paging IO, wait=TRUE is correct.
+	 */
 	// &fileObject->FileName, byteOffset.QuadPart, bufferLength,
 	// Irp->MdlAddress, Irp->AssociatedIrp.SystemBuffer);
 
@@ -6828,7 +6849,7 @@ add_thread_job(PDEVICE_OBJECT DeviceObject, PIRP Irp, int len,
 
 	IoQueueWorkItem((PIO_WORKITEM)&job->work_item,
 	    (PIO_WORKITEM_ROUTINE)do_job,
-	    DelayedWorkQueue, job);
+	    CriticalWorkQueue, job);
 
 	return (TRUE);
 }
