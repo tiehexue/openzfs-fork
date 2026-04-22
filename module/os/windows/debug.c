@@ -165,6 +165,7 @@ printBuffer(const char *fmt, ...)
 	// DPCs can't block (mutex) - replace this code with spinlocks
 	KIRQL level;
 	va_list args;
+
 	va_start(args, fmt);
 	char buf[max_line_length];
 	int buf_used;

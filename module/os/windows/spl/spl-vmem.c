@@ -661,10 +661,10 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 		// below we set p to n and update n.
 		ASSERT(n != NULL);
 		if (n == nextlist) {
-			dprintf("SPL: %s: at marker (%s)(steps: %u) "
-			    "p->vs_start, end == %lu, %lu\n",
-			    __func__, vmp->vm_name, step,
-			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
+//			dprintf("SPL: %s: at marker (%s)(steps: %u) "
+//			    "p->vs_start, end == %lu, %lu\n",
+//			    __func__, vmp->vm_name, step,
+//			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
 			// IOSleep(1);
 			// the next entry is the next marker (e.g. 16k marker)
 			break;
