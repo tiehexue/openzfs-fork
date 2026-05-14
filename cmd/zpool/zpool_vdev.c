@@ -284,6 +284,18 @@ make_leaf_vdev(const char *arg, boolean_t is_primary, uint64_t ashift)
 	 * 'path'.  We detect whether this is a device of file afterwards by
 	 * checking the st_mode of the file.
 	 */
+
+	/*
+	 * Remote block device (remote://host:port) - no local filesystem
+	 * checks needed. The URI itself is the path.
+	 */
+	if (strncmp(arg, "remote://", 9) == 0) {
+		(void) strlcpy(path, arg, sizeof (path));
+		type = VDEV_TYPE_REMOTE;
+		wholedisk = B_FALSE;
+		goto skip_type_detect;
+	}
+
 #ifdef _WIN32
 	if (arg[0] == '/' || arg[0] == '\\') {
 #else
@@ -352,6 +364,7 @@ make_leaf_vdev(const char *arg, boolean_t is_primary, uint64_t ashift)
 		}
 	}
 
+skip_type_detect:
 	if (type == NULL) {
 		/*
 		 * Determine whether this is a device or a file.
@@ -1198,6 +1211,9 @@ is_device_in_use(nvlist_t *config, nvlist_t *nv, boolean_t force,
 
 		else if (strcmp(type, VDEV_TYPE_FILE) == 0)
 			ret = check_file(path, force, isspare);
+
+		else if (strcmp(type, VDEV_TYPE_REMOTE) == 0)
+			ret = 0; /* remote vdevs are always valid */
 
 		return (ret != 0);
 	}

@@ -39,6 +39,7 @@ target_link_libraries(OpenZFS
 	nvpairkern
 	# WDK libraries
 	WDK::WDMSEC
+	WDK::NETIO
 #	WDK::STORPORT
 #	WDK::SCSIWMI
 )

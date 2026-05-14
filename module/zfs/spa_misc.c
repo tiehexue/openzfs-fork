@@ -45,6 +45,7 @@
 #include <sys/vdev_initialize.h>
 #include <sys/vdev_trim.h>
 #include <sys/vdev_file.h>
+#include <sys/vdev_remote.h>
 #include <sys/vdev_raidz.h>
 #include <sys/metaslab.h>
 #include <sys/uberblock_impl.h>
@@ -2662,6 +2663,7 @@ spa_init(spa_mode_t mode)
 	vdev_mirror_stat_init();
 	vdev_raidz_math_init();
 	vdev_file_init();
+	vdev_remote_init();
 	zfs_prop_init();
 	chksum_init();
 	zpool_prop_init();
@@ -2682,6 +2684,7 @@ spa_fini(void)
 	spa_evict_all();
 
 	vdev_file_fini();
+	vdev_remote_fini();
 	vdev_mirror_stat_fini();
 	vdev_raidz_math_fini();
 	chksum_fini();

@@ -83,6 +83,7 @@ wdk_add_library(zfskern
   vdev_draid.c
   vdev_draid_rand.c
   vdev_file.c
+  vdev_remote.c
   vdev_indirect.c
   vdev_indirect_births.c
   vdev_indirect_mapping.c

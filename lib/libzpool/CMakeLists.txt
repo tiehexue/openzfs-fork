@@ -123,6 +123,7 @@ add_library(libzpool
     "${MODULE_DIR}/zfs/vdev_draid.c"
     "${MODULE_DIR}/zfs/vdev_draid_rand.c"
     "${MODULE_DIR}/zfs/vdev_file.c"
+    "${MODULE_DIR}/zfs/vdev_remote.c"
     "${MODULE_DIR}/zfs/vdev_indirect.c"
     "${MODULE_DIR}/zfs/vdev_indirect_births.c"
     "${MODULE_DIR}/zfs/vdev_indirect_mapping.c"

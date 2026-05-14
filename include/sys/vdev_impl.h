@@ -41,6 +41,7 @@
 #include <sys/vdev_indirect_births.h>
 #include <sys/vdev_rebuild.h>
 #include <sys/vdev_removal.h>
+#include <sys/vdev_remote.h>
 #include <sys/zfs_ratelimit.h>
 
 #ifdef	__cplusplus
@@ -613,6 +614,7 @@ extern vdev_ops_t vdev_draid_ops;
 extern vdev_ops_t vdev_draid_spare_ops;
 extern vdev_ops_t vdev_disk_ops;
 extern vdev_ops_t vdev_file_ops;
+extern vdev_ops_t vdev_remote_ops;
 extern vdev_ops_t vdev_missing_ops;
 extern vdev_ops_t vdev_hole_ops;
 extern vdev_ops_t vdev_spare_ops;

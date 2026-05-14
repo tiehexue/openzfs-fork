@@ -11,6 +11,7 @@ qat_crypt.c
 spa_misc_os.c
 sysctl_os.c
 vdev_disk.c
+vdev_remote_os.c
 vdev_label_os.c
 zfs_acl.c
 zfs_racct.c 

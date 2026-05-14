@@ -91,3 +91,4 @@ changelog
 *.orig
 *.tmp
 *.log
+contrib/windows/OpenZFSOnWindows-debug-2.4.1*

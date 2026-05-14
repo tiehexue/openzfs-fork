@@ -276,6 +276,7 @@ static vdev_ops_t *const vdev_ops_table[] = {
 	&vdev_spare_ops,
 	&vdev_disk_ops,
 	&vdev_file_ops,
+	&vdev_remote_ops,
 	&vdev_missing_ops,
 	&vdev_hole_ops,
 	&vdev_indirect_ops,
