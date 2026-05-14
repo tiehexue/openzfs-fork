@@ -80,7 +80,10 @@
 #include <Windows.h>
 #include <Setupapi.h>
 #include <Ntddstor.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 /*
  * We allow /dev/ to be search in DEBUG build
@@ -225,17 +228,230 @@ zfs_slashes(char *s)
 		*r = '/';
 }
 
+/*
+ * Remote VDEV RPC header - must match sys/vdev_remote.h exactly.
+ */
+#pragma pack(push, 1)
+typedef struct {
+	uint32_t	cmd;
+	uint32_t	status;
+	uint64_t	offset;
+	uint32_t	size;
+	uint32_t	reserved;
+} remote_rpc_hdr_t;
+#pragma pack(pop)
+
+#define REMOTE_CMD_READ  0x52454144  /* "READ" */
+#define REMOTE_STATUS_OK 0
+
+/*
+ * Read a range of bytes from a remote VDEV daemon via TCP.
+ * Parses "remote://host:port" URI, connects, reads exactly 'size' bytes
+ * at 'offset', stores in 'buf'. Returns 0 on success, -1 on failure.
+ */
+static int
+pread_remote(const char *uri, void *buf, size_t size, uint64_t offset,
+    uint64_t *dev_size)
+{
+	const char *p;
+	char host[256];
+	uint16_t port = 0;
+	SOCKET sock = INVALID_SOCKET;
+	remote_rpc_hdr_t hdr;
+	int ret = -1;
+
+	/* Parse remote://host:port */
+	if (strncmp(uri, "remote://", 9) != 0)
+		return (-1);
+	p = uri + 9;
+	const char *colon = strrchr(p, ':');
+	if (!colon || colon == p)
+		return (-1);
+	size_t hostlen = (size_t)(colon - p);
+	if (hostlen >= sizeof(host))
+		return (-1);
+	memcpy(host, p, hostlen);
+	host[hostlen] = '\0';
+	port = (uint16_t)atoi(colon + 1);
+	if (port == 0)
+		return (-1);
+
+	/* Winsock init (thread-safe if already called) */
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+		return (-1);
+
+	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sock == INVALID_SOCKET)
+		goto out;
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = inet_addr(host);
+	if (addr.sin_addr.s_addr == INADDR_NONE)
+		goto out;
+
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+		goto out;
+
+	/* Send INFO command to get device size */
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.cmd = 0x494E464F;  /* "INFO" */
+	if (send(sock, (const char *)&hdr, sizeof(hdr), 0) != sizeof(hdr))
+		goto out;
+	if (recv(sock, (char *)&hdr, sizeof(hdr), 0) != sizeof(hdr))
+		goto out;
+	if (dev_size)
+		*dev_size = hdr.offset;  /* server puts size in offset field */
+
+	/* Send READ command */
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.cmd = REMOTE_CMD_READ;
+	hdr.offset = offset;
+	hdr.size = (uint32_t)size;
+	if (send(sock, (const char *)&hdr, sizeof(hdr), 0) != sizeof(hdr))
+		goto out;
+
+	/* Receive response header */
+	if (recv(sock, (char *)&hdr, sizeof(hdr), 0) != sizeof(hdr))
+		goto out;
+	if (hdr.status != REMOTE_STATUS_OK)
+		goto out;
+
+	/* Receive data */
+	size_t total = 0;
+	char *dst = (char *)buf;
+	while (total < hdr.size) {
+		int n = recv(sock, dst + total, (int)(hdr.size - total), 0);
+		if (n <= 0)
+			goto out;
+		total += n;
+	}
+
+	ret = 0;
+out:
+	if (sock != INVALID_SOCKET)
+		closesocket(sock);
+	return (ret);
+}
+
+/*
+ * Read ZFS labels from a remote VDEV via TCP.
+ * Mirrors zpool_read_label_win() but uses the daemon RPC protocol.
+ */
+static int
+zpool_read_label_remote(const char *uri,
+    nvlist_t **config, int *num_labels)
+{
+	vdev_label_t *label;
+	nvlist_t *expected_config = NULL;
+	uint64_t expected_guid = 0, size;
+	int l, count = 0;
+	uint64_t devsize = 0;
+
+	*config = NULL;
+
+	label = (vdev_label_t *)malloc(sizeof(vdev_label_t));
+	if (label == NULL)
+		return (-1);
+
+	/*
+	 * First read just the first label to determine device size.
+	 * The label stores its own position, and we read all 4 labels.
+	 * For remote vdevs we can't compute label offsets without size,
+	 * so we query the daemon for total device size first.
+	 */
+	if (pread_remote(uri, label, sizeof(vdev_label_t),
+	    0, &devsize) != 0) {
+		free(label);
+		return (-1);
+	}
+
+	size = P2ALIGN_TYPED(devsize, sizeof(vdev_label_t), uint64_t);
+
+	for (l = 0; l < VDEV_LABELS; l++) {
+		uint64_t state, guid, txg;
+		uint64_t lo;
+
+		if (l < VDEV_LABELS / 2)
+			lo = (uint64_t)l * sizeof(vdev_label_t);
+		else
+			lo = size - (uint64_t)(VDEV_LABELS - l) *
+			    sizeof(vdev_label_t);
+
+		if (pread_remote(uri, label, sizeof(vdev_label_t),
+		    lo, NULL) != 0)
+			continue;
+
+		if (nvlist_unpack(label->vl_vdev_phys.vp_nvlist,
+		    sizeof(label->vl_vdev_phys.vp_nvlist), config, 0) != 0)
+			continue;
+
+		if (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_GUID,
+		    &guid) != 0 || guid == 0) {
+			nvlist_free(*config);
+			continue;
+		}
+
+		if (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_POOL_STATE,
+		    &state) != 0 || state > POOL_STATE_L2CACHE) {
+			nvlist_free(*config);
+			continue;
+		}
+
+		if (state != POOL_STATE_SPARE && state != POOL_STATE_L2CACHE &&
+		    (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_POOL_TXG,
+		    &txg) != 0 || txg == 0)) {
+			nvlist_free(*config);
+			continue;
+		}
+
+		if (expected_guid) {
+			if (expected_guid == guid)
+				count++;
+			nvlist_free(*config);
+		} else {
+			expected_config = *config;
+			expected_guid = guid;
+			count++;
+		}
+	}
+
+	if (num_labels != NULL)
+		*num_labels = count;
+
+	free(label);
+	*config = expected_config;
+	return (0);
+}
+
 void
 zpool_open_func(void *arg)
 {
 	rdsk_node_t *rn = arg;
 	libpc_handle_t *hdl = rn->rn_hdl;
-	struct stat64 statbuf;
 	nvlist_t *config;
-	char *bname, *dupname;
 	uint64_t vdev_guid = 0;
 	int error;
 	int num_labels = 0;
+
+	/*
+	 * Handle remote:// vdevs via TCP to the daemon.
+	 * No local file handle needed.
+	 */
+	if (strncmp(rn->rn_name, "remote://", 9) == 0) {
+		if (zpool_read_label_remote(rn->rn_name,
+		    &config, &num_labels) != 0) {
+			(void) fprintf(stderr,
+			    "error: cannot read labels from "
+			    "remote vdev '%s'\n", rn->rn_name);
+			return;
+		}
+		goto remote_done;
+	}
+
 	HANDLE h;
 	uint64_t offset = 0;
 	uint64_t len = 0;
@@ -316,6 +532,9 @@ zpool_open_func(void *arg)
 		return;
 	}
 
+	CloseHandle(h);
+
+remote_done:
 	/*
 	 * Check that the vdev is for the expected guid.  Additional entries
 	 * are speculatively added based on the paths stored in the labels.
@@ -323,12 +542,9 @@ zpool_open_func(void *arg)
 	 */
 	error = nvlist_lookup_uint64(config, ZPOOL_CONFIG_GUID, &vdev_guid);
 	if (error || (rn->rn_vdev_guid && rn->rn_vdev_guid != vdev_guid)) {
-		CloseHandle(h);
 		nvlist_free(config);
 		return;
 	}
-
-	CloseHandle(h);
 
 	rn->rn_config = config;
 	rn->rn_num_labels = num_labels;
@@ -1038,6 +1254,14 @@ update_vdev_config_dev_strs(nvlist_t *nv)
 
 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
 		return;
+
+	/*
+	 * Remote vdevs: path is a remote:// URI — no local device
+	 * to open, no path rewriting needed. Leave as-is.
+	 */
+	if (strncmp(path, "remote://", 9) == 0)
+		return;
+
 	nvlist_lookup_uint64(nv, ZPOOL_CONFIG_WHOLE_DISK, &wholedisk);
 
 	fprintf(stderr, "working on dev '%s'\n", path); fflush(stderr);

@@ -1396,6 +1396,34 @@ zpool_find_import_scan(libpc_handle_t *hdl, pthread_mutex_t *lock,
 	for (i = 0; i < dirs; i++) {
 		struct stat sbuf;
 
+		/*
+		 * Handle remote:// URIs directly — stat() won't work
+		 * since these are network endpoints, not local paths.
+		 */
+		if (strncmp(dir[i], "remote://", 9) == 0) {
+			avl_index_t where;
+			rdsk_node_t *slice;
+
+			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
+			slice->rn_name = zutil_strdup(hdl, dir[i]);
+			slice->rn_vdev_guid = 0;
+			slice->rn_lock = lock;
+			slice->rn_avl = cache;
+			slice->rn_hdl = hdl;
+			slice->rn_order = i + IMPORT_ORDER_SCAN_OFFSET;
+			slice->rn_labelpaths = B_FALSE;
+
+			pthread_mutex_lock(lock);
+			if (avl_find(cache, slice, &where)) {
+				free(slice->rn_name);
+				free(slice);
+			} else {
+				avl_insert(cache, slice, where);
+			}
+			pthread_mutex_unlock(lock);
+			continue;
+		}
+
 		if (stat(dir[i], &sbuf) != 0) {
 			error = errno;
 			if (error == ENOENT)
@@ -1537,9 +1565,15 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
 				 * Under zdb, this step isn't required and
 				 * would prevent a zdb -e of active pools with
 				 * no cachefile.
+				 *
+				 * Remote vdevs skip local open() — they're
+				 * network endpoints, not local files.
 				 */
-				fd = open(slice->rn_name,
-				    O_RDONLY | O_EXCL | O_CLOEXEC);
+				if (strncmp(slice->rn_name, "remote://", 9) == 0)
+					fd = 0;
+				else
+					fd = open(slice->rn_name,
+					    O_RDONLY | O_EXCL | O_CLOEXEC);
 				if (fd >= 0 || iarg->can_be_active) {
 					if (fd >= 0)
 						close(fd);
