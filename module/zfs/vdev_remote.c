@@ -169,6 +169,7 @@ vdev_remote_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
     uint64_t *logical_ashift, uint64_t *physical_ashift)
 {
 	vdev_remote_t *vr;
+	int error;
 
 	/*
 	 * Remote devices are always non-rotational.
@@ -188,10 +189,24 @@ vdev_remote_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		return (SET_ERROR(EINVAL));
 	}
 
-	/* Reopen: just re-read device info */
+	/* Reopen: reconnect if needed, then re-read device info */
 	if (vd->vdev_tsd != NULL) {
 		ASSERT(vd->vdev_reopening);
 		vr = vd->vdev_tsd;
+
+		/*
+		 * If the connection was lost (e.g. server restart, network
+		 * blip) proactively re-establish the link so that
+		 * vdev_remote_os_info below succeeds.
+		 *
+		 * vdev_remote_os_connect resets backoff and tears down any
+		 * stale socket, so this is safe to call unconditionally.
+		 */
+		if (!vr->vr_connected) {
+			error = vdev_remote_os_connect(vr);
+			if (error == 0)
+				vr->vr_connected = B_TRUE;
+		}
 		goto skip_open;
 	}
 
@@ -199,7 +214,7 @@ vdev_remote_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	mutex_init(&vr->vr_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* Parse host:port from the URI */
-	int error = vdev_remote_parse_uri(vd->vdev_path,
+	error = vdev_remote_parse_uri(vd->vdev_path,
 	    vr->vr_host, sizeof (vr->vr_host), &vr->vr_port);
 	if (error != 0) {
 		vd->vdev_stat.vs_aux = VDEV_AUX_BAD_LABEL;
@@ -273,6 +288,9 @@ vdev_remote_close(vdev_t *vd)
 /*
  * Background I/O strategy: performs the actual RPC call.
  * Runs on the vdev_remote_taskq.
+ *
+ * The OS layer (vdev_remote_os_io) handles connection state, reconnect,
+ * and backoff internally, so we just call through unconditionally.
  */
 static void
 vdev_remote_io_strategy(void *arg)
@@ -283,7 +301,7 @@ vdev_remote_io_strategy(void *arg)
 	void *buf = NULL;
 	uint32_t size = (uint32_t)zio->io_size;
 
-	if (vr == NULL || !vr->vr_connected) {
+	if (vr == NULL) {
 		zio->io_error = SET_ERROR(ENXIO);
 		zio_delay_interrupt(zio);
 		return;
@@ -310,6 +328,8 @@ vdev_remote_io_strategy(void *arg)
 
 /*
  * Flush (sync) operation: tells remote daemon to fsync.
+ *
+ * The OS layer handles reconnect internally.
  */
 static void
 vdev_remote_io_flush(void *arg)
@@ -318,7 +338,7 @@ vdev_remote_io_flush(void *arg)
 	vdev_t *vd = zio->io_vd;
 	vdev_remote_t *vr = vd->vdev_tsd;
 
-	if (vr == NULL || !vr->vr_connected) {
+	if (vr == NULL) {
 		zio->io_error = SET_ERROR(ENXIO);
 		zio_interrupt(zio);
 		return;
@@ -330,6 +350,8 @@ vdev_remote_io_flush(void *arg)
 
 /*
  * TRIM/UNMAP operation: tells remote daemon to deallocate.
+ *
+ * The OS layer handles reconnect internally.
  */
 static void
 vdev_remote_io_trim(void *arg)
@@ -338,7 +360,7 @@ vdev_remote_io_trim(void *arg)
 	vdev_t *vd = zio->io_vd;
 	vdev_remote_t *vr = vd->vdev_tsd;
 
-	if (vr == NULL || !vr->vr_connected) {
+	if (vr == NULL) {
 		zio->io_error = SET_ERROR(ENXIO);
 		zio_interrupt(zio);
 		return;

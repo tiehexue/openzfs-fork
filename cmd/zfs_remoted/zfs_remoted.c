@@ -8,6 +8,7 @@
  * zfs_remoted - ZFS Remote Block Device Daemon for Windows
  *
  * Serves a block device over TCP using the remote VDEV RPC protocol.
+ * Supports up to 64 concurrent ZFS kernel clients.
  *
  * Usage:
  *   zfs_remoted -f <image_file> -p <port>   (file backend)
@@ -18,13 +19,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <process.h>
 
 #pragma comment(lib, "Ws2_32.lib")
+
+/* ---- constants ---- */
+#define MAX_CLIENTS 64
 
 /* ---- daemon state ---- */
 static volatile LONG    g_running = 1;
 static block_backend_t  g_backend;
 static CRITICAL_SECTION g_backend_lock;
+
+/* ---- client-thread tracking ---- */
+static HANDLE           g_threads[MAX_CLIENTS];
+static LONG             g_thread_count = 0;
+static CRITICAL_SECTION g_threads_lock;
+
+/* ---- forward declarations ---- */
+static void handle_read(SOCKET s, rpc_hdr_t *hdr);
+static void handle_write(SOCKET s, rpc_hdr_t *hdr);
+static void handle_flush(SOCKET s);
+static void handle_trim(SOCKET s, rpc_hdr_t *hdr);
+static void handle_info(SOCKET s);
+static DWORD WINAPI handle_client_thread(LPVOID param);
 
 /* ---- network helpers ---- */
 int
@@ -148,41 +166,95 @@ static void handle_trim(SOCKET s, rpc_hdr_t *hdr)
 	send_all(s, &resp, sizeof(resp));
 }
 
-static void handle_info(SOCKET s)
+static void
+handle_info(SOCKET s)
 {
 	rpc_hdr_t resp;
+	EnterCriticalSection(&g_backend_lock);
 	resp.cmd = CMD_INFO; resp.status = STATUS_OK;
 	resp.offset = g_backend.bb_dev_size;
 	resp.size   = g_backend.bb_lbasize;
 	resp.reserved = g_backend.bb_pbasize;
+	LeaveCriticalSection(&g_backend_lock);
 	send_all(s, &resp, sizeof(resp));
 }
 
-/* ---- client connection loop ---- */
+/* ---- thread scavenger: reap finished client threads ---- */
 static void
-handle_client(SOCKET client_sock)
+scavenge_threads(void)
 {
+	EnterCriticalSection(&g_threads_lock);
+	int write_idx = 0;
+	for (int i = 0; i < g_thread_count; i++) {
+		if (WaitForSingleObject(g_threads[i], 0) == WAIT_OBJECT_0) {
+			/* thread has exited — clean up */
+			CloseHandle(g_threads[i]);
+		} else {
+			/* thread still running — keep it */
+			g_threads[write_idx++] = g_threads[i];
+		}
+	}
+	g_thread_count = write_idx;
+	LeaveCriticalSection(&g_threads_lock);
+}
+
+/* ---- per-client thread entry point ---- */
+static DWORD WINAPI
+handle_client_thread(LPVOID param)
+{
+	SOCKET client_sock = (SOCKET)(INT_PTR)param;
 	rpc_hdr_t hdr;
-	fprintf(stderr, "Client connected (%s backend)\n", g_backend.bb_label);
+	DWORD tid = GetCurrentThreadId();
+
+	fprintf(stderr, "[tid %lu] connected (%s backend)\n",
+	    tid, g_backend.bb_label);
 
 	while (g_running) {
-		if (recv_all(client_sock, &hdr, sizeof(hdr)) != 0) break;
+		/*
+		 * Wait for the next RPC header with a 1 s timeout so we
+		 * re-check g_running periodically and can shut down cleanly.
+		 */
+		fd_set rfds;
+		FD_ZERO(&rfds);
+		FD_SET(client_sock, &rfds);
+		struct timeval tv = { 1, 0 };
+		int sr = select(0, &rfds, NULL, NULL, &tv);
+		if (sr < 0)
+			break;                    /* socket error */
+		if (sr == 0)
+			continue;                /* timeout → re-check g_running */
+
+		if (recv_all(client_sock, &hdr, sizeof(hdr)) != 0)
+			break;                    /* client closed or error */
 
 		switch (hdr.cmd) {
-		case CMD_READ:  handle_read(client_sock, &hdr);  break;
-		case CMD_WRITE: handle_write(client_sock, &hdr); break;
-		case CMD_FLUSH: handle_flush(client_sock);        break;
-		case CMD_TRIM:  handle_trim(client_sock, &hdr);   break;
-		case CMD_INFO:  handle_info(client_sock);         break;
+		case CMD_READ:
+			handle_read(client_sock, &hdr);
+			break;
+		case CMD_WRITE:
+			handle_write(client_sock, &hdr);
+			break;
+		case CMD_FLUSH:
+			handle_flush(client_sock);
+			break;
+		case CMD_TRIM:
+			handle_trim(client_sock, &hdr);
+			break;
+		case CMD_INFO:
+			handle_info(client_sock);
+			break;
 		default:
-			fprintf(stderr, "Unknown cmd 0x%08X\n", hdr.cmd);
+			fprintf(stderr, "[tid %lu] unknown cmd 0x%08X\n",
+			    tid, hdr.cmd);
 			hdr.status = STATUS_ERR_INVAL;
 			send_all(client_sock, &hdr, sizeof(hdr));
 			break;
 		}
 	}
+
 	closesocket(client_sock);
-	fprintf(stderr, "Client disconnected\n");
+	fprintf(stderr, "[tid %lu] disconnected\n", tid);
+	return 0;
 }
 
 /* ---- usage / ctrl-c ---- */
@@ -215,7 +287,7 @@ main(int argc, char *argv[])
 
 	/* ensure output immediately visible */
 	setvbuf(stderr, NULL, _IONBF, 0);
-	fprintf(stderr, "zfs_remoted starting...\n");
+	fprintf(stderr, "zfs_remoted starting (multi-client mode)...\n");
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-f") == 0 && i + 1 < argc)
@@ -237,32 +309,33 @@ main(int argc, char *argv[])
 	if (file_spec && disk_spec)
 		{ fprintf(stderr, "Use -f OR -d, not both.\n"); return 1; }
 
-	/* open backend */
+	/* ---- open backend ---- */
 	memset(&g_backend, 0, sizeof(g_backend));
 	g_backend = file_spec ? file_backend : disk_backend;
-	fprintf(stderr, "Opening %s backend with '%s'...\n",
-	    g_backend.bb_label, file_spec ? file_spec : disk_spec);
-	fflush(stderr);
 
-	int rc = g_backend.bb_open(&g_backend,
-	    file_spec ? file_spec : disk_spec);
-	fprintf(stderr, "bb_open returned %d\n", rc);
-	fflush(stderr);
-
-	if (rc) {
-		fprintf(stderr, "Failed to open backend: %lu\n", GetLastError());
-		return 1;
+	{
+		int rc = g_backend.bb_open(&g_backend,
+		    file_spec ? file_spec : disk_spec);
+		if (rc) {
+			fprintf(stderr, "Failed to open backend: %lu\n",
+			    GetLastError());
+			return 1;
+		}
 	}
+
 	fprintf(stderr, "Backend opened, %llu bytes\n",
 	    (unsigned long long)g_backend.bb_dev_size);
 
 	InitializeCriticalSection(&g_backend_lock);
+	InitializeCriticalSection(&g_threads_lock);
 
 	/* winsock */
 	WSADATA wsa;
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
 		fprintf(stderr, "WSAStartup failed: %d\n", WSAGetLastError());
 		g_backend.bb_close(&g_backend);
+		DeleteCriticalSection(&g_backend_lock);
+		DeleteCriticalSection(&g_threads_lock);
 		return 1;
 	}
 
@@ -271,12 +344,16 @@ main(int argc, char *argv[])
 		fprintf(stderr, "socket failed: %d\n", WSAGetLastError());
 		WSACleanup();
 		g_backend.bb_close(&g_backend);
+		DeleteCriticalSection(&g_backend_lock);
+		DeleteCriticalSection(&g_threads_lock);
 		return 1;
 	}
 
-	int reuse = 1;
-	setsockopt(lsn, SOL_SOCKET, SO_REUSEADDR,
-	    (const char *)&reuse, sizeof(reuse));
+	{
+		int reuse = 1;
+		setsockopt(lsn, SOL_SOCKET, SO_REUSEADDR,
+		    (const char *)&reuse, sizeof(reuse));
+	}
 
 	struct sockaddr_in srv = { 0 };
 	srv.sin_family = AF_INET;
@@ -288,6 +365,8 @@ main(int argc, char *argv[])
 		closesocket(lsn);
 		WSACleanup();
 		g_backend.bb_close(&g_backend);
+		DeleteCriticalSection(&g_backend_lock);
+		DeleteCriticalSection(&g_threads_lock);
 		return 1;
 	}
 
@@ -296,33 +375,99 @@ main(int argc, char *argv[])
 		closesocket(lsn);
 		WSACleanup();
 		g_backend.bb_close(&g_backend);
+		DeleteCriticalSection(&g_backend_lock);
+		DeleteCriticalSection(&g_threads_lock);
 		return 1;
 	}
 
 	SetConsoleCtrlHandler(ctrl_handler, TRUE);
-	fprintf(stderr, "zfs_remoted: port %u, %s backend, %llu MiB\n",
+	fprintf(stderr,
+	    "zfs_remoted: port %u, %s backend, %llu MiB, max %d clients\n",
 	    port, g_backend.bb_label,
-	    (unsigned long long)(g_backend.bb_dev_size / (1024*1024)));
-	fflush(stderr);
+	    (unsigned long long)(g_backend.bb_dev_size / (1024 * 1024)),
+	    MAX_CLIENTS);
 
+	/* ---- accept loop ---- */
 	while (g_running) {
+		fd_set rfds;
+		FD_ZERO(&rfds);
+		FD_SET(lsn, &rfds);
 		struct timeval tv = { 1, 0 };
-		fd_set rfds; FD_ZERO(&rfds); FD_SET(lsn, &rfds);
 		int sr = select(0, &rfds, NULL, NULL, &tv);
 		if (sr < 0) {
-			fprintf(stderr, "select error: %d\n", WSAGetLastError());
+			fprintf(stderr, "select error: %d\n",
+			    WSAGetLastError());
 			break;
 		}
-		if (sr == 0) continue;
+		if (sr == 0) {
+			/* no incoming connections — reap finished threads */
+			scavenge_threads();
+			continue;
+		}
 
 		SOCKET cli = accept(lsn, NULL, NULL);
-		if (cli != INVALID_SOCKET) handle_client(cli);
+		if (cli == INVALID_SOCKET) {
+			if (g_running)
+				fprintf(stderr, "accept error: %d\n",
+				    WSAGetLastError());
+			continue;
+		}
+
+		/* spawn a worker thread for this client */
+		EnterCriticalSection(&g_threads_lock);
+		if (g_thread_count >= MAX_CLIENTS) {
+			LeaveCriticalSection(&g_threads_lock);
+			fprintf(stderr,
+			    "max clients (%d) reached, rejecting connection\n",
+			    MAX_CLIENTS);
+			closesocket(cli);
+			continue;
+		}
+
+		HANDLE h = CreateThread(NULL, 0, handle_client_thread,
+		    (LPVOID)(INT_PTR)cli, 0, NULL);
+		if (h) {
+			g_threads[g_thread_count++] = h;
+			fprintf(stderr, "client accepted (%d/%d active)\n",
+			    (int)g_thread_count, MAX_CLIENTS);
+		} else {
+			fprintf(stderr, "CreateThread failed: %lu\n",
+			    GetLastError());
+			closesocket(cli);
+		}
+		LeaveCriticalSection(&g_threads_lock);
 	}
 
-	fprintf(stderr, "Shutting down...\n");
+	/* ---- graceful shutdown ---- */
+	fprintf(stderr, "Shutting down, waiting for %d client(s)...\n",
+	    (int)g_thread_count);
+
+	/* Close the listen socket so no new connections arrive. */
 	closesocket(lsn);
-	WSACleanup();
+
+	/*
+	 * Wait for every client thread to finish.  Each thread checks
+	 * g_running at least once per second and will exit promptly.
+	 * Use a 10 s per-thread timeout as a safety net.
+	 */
+	EnterCriticalSection(&g_threads_lock);
+	for (int i = 0; i < g_thread_count; i++) {
+		DWORD wr = WaitForSingleObject(g_threads[i], 10000);
+		if (wr == WAIT_TIMEOUT) {
+			fprintf(stderr,
+			    "warning: thread %d did not exit in time\n", i);
+			TerminateThread(g_threads[i], 1);
+		}
+		CloseHandle(g_threads[i]);
+	}
+	g_thread_count = 0;
+	LeaveCriticalSection(&g_threads_lock);
+
+	DeleteCriticalSection(&g_threads_lock);
 	DeleteCriticalSection(&g_backend_lock);
+	WSACleanup();
 	g_backend.bb_close(&g_backend);
+
+	fprintf(stderr, "zfs_remoted stopped.\n");
 	return 0;
 }

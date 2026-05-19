@@ -67,6 +67,13 @@ typedef struct vdev_remote_rpc_hdr {
 #define VDEV_REMOTE_STATUS_ERR_NOSPC	3
 
 /*
+ * Reconnect / timeout constants (in milliseconds).
+ */
+#define VDEV_REMOTE_WSK_TIMEOUT_MS		30000	/* per-WSK-op timeout */
+#define VDEV_REMOTE_RECONNECT_BACKOFF_MIN_MS	1000	/* 1 s initial backoff */
+#define VDEV_REMOTE_RECONNECT_BACKOFF_MAX_MS	60000	/* 60 s max backoff */
+
+/*
  * Per-instance state for a remote VDEV.
  */
 typedef struct vdev_remote {
@@ -78,6 +85,8 @@ typedef struct vdev_remote {
 	uint32_t		vr_phys_block_size;
 	kmutex_t		vr_lock;
 	boolean_t		vr_connected;
+	hrtime_t		vr_reconnect_until;	/* backoff deadline */
+	uint32_t		vr_reconnect_backoff;	/* current backoff in ms */
 } vdev_remote_t;
 
 /*
