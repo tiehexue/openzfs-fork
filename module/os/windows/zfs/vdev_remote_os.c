@@ -411,6 +411,10 @@ vdev_remote_wsk_send_recv(PWSK_SOCKET sock,
  * vr_connected are updated and the backoff state is reset.
  * On failure the backoff timer is advanced.
  *
+ * The first reconnect attempt after a disconnect is always immediate
+ * (backoff is only enforced on retries), so that a freshly imported
+ * or mounted pool can recover its connection without artificial delay.
+ *
  * Returns: 0 on success, errno on failure.
  */
 static int
@@ -468,16 +472,25 @@ vdev_remote_os_reconnect(vdev_remote_t *vr)
 	return (0);
 
 fail:
-	/* Advance exponential backoff. */
-	if (vr->vr_reconnect_backoff == 0)
+	/*
+	 * Advance exponential backoff, but always allow at least ONE
+	 * fresh attempt: if backoff is still 0 this is the first
+	 * failure since the last successful connect, so set the
+	 * deadline to "now" meaning the next caller gets an immediate
+	 * retry.  Only after that retry also fails do we start
+	 * enforcing delays.
+	 */
+	if (vr->vr_reconnect_backoff == 0) {
 		vr->vr_reconnect_backoff = VDEV_REMOTE_RECONNECT_BACKOFF_MIN_MS;
-	else
+		vr->vr_reconnect_until = gethrtime();  /* now → immediate ok */
+	} else {
 		vr->vr_reconnect_backoff = MIN(
 		    vr->vr_reconnect_backoff * 2,
 		    VDEV_REMOTE_RECONNECT_BACKOFF_MAX_MS);
-
-	vr->vr_reconnect_until = gethrtime() +
-	    (hrtime_t)vr->vr_reconnect_backoff * (NANOSEC / MILLISEC);
+		vr->vr_reconnect_until = gethrtime() +
+		    (hrtime_t)vr->vr_reconnect_backoff *
+		    (NANOSEC / MILLISEC);
+	}
 
 	dprintf("vdev_remote: reconnect %s:%u failed (err %d), "
 	    "backoff %ums\n", vr->vr_host, vr->vr_port,
