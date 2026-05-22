@@ -30,29 +30,42 @@ We have a [Code of Conduct](./CODE_OF_CONDUCT.md).
 OpenZFS is released under a CDDL license.
 For more details see the NOTICE, LICENSE and COPYRIGHT files; `UCRL-CODE-235197`
 
-# Supported Kernels
-  * The `META` file contains the officially recognized supported Linux kernel versions.
-  * Supported FreeBSD versions are any supported branches and releases starting from 13.0-RELEASE.
+# Supported Kernels and Distributions
 
-# MacOS Tahoe 26.4 compiling steps
-```sh
-# 1) install build tools
-brew install autoconf automake libtool pkg-config openssl gettext coreutils
-# 2)
-git checkout zfs-macOS-2.4.1-release
-# 3)
-sh autogen.sh
-# 4)
-./configure \                         
-  CPPFLAGS="-I/opt/homebrew/opt/gettext/include -I/opt/homebrew/opt/openssl@3/include" \
-  LDFLAGS="-L/opt/homebrew/opt/gettext/lib -L/opt/homebrew/opt/openssl@3/lib"
-# 5)
-make -s -j$(sysctl -n hw.ncpu)
-```
-There should be compiling error:
-```sh
-module/os/macos/spl/spl-kmem.c:5662:32: error: incompatible function pointer types passing 'void (void)' to parameter of type 'thread_func_t'
-      (aka 'void (*)(void *)') [-Wincompatible-function-pointer-types]
- 5662 |         (void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
-```
-just modify module/os/macos/spl/spl-kmem.c:4650 to "spl_free_thread(void *arg __unused)", and continue.
+## Linux
+
+Given the wide variety of Linux environments, we prioritize development and testing on stable, supported kernels and distributions.
+
+### Kernel ([kernel.org](https://kernel.org))
+
+All **longterm** kernels from [kernel.org](https://kernel.org) are supported. **stable** kernels are usually supported in the next OpenZFS release.
+
+**Supported longterm kernels**: **6.18**, **6.12**, **6.6**, **6.1**, **5.15**, **5.10**.
+
+### Red Hat Enterprise Linux (RHEL)
+
+All RHEL (and compatible systems: AlmaLinux OS, Rocky Linux, etc) on the **full** or **maintenance** support tracks are supported.
+
+**Supported RHEL releases**: **8.10**, **9.7**, **10.1**.
+
+### Ubuntu
+
+All Ubuntu **LTS** releases are supported.
+
+**Supported Ubuntu releases**: **26.04 “Resolute”**, **24.04 “Noble”**, **22.04 “Jammy”**.
+
+### Debian
+
+All Debian **stable** and **LTS** releases are supported.
+
+**Supported Debian releases**: **13 “Trixie”**, **12 “Bookworm”**, **11 “Bullseye”**.
+
+### Other Distributions
+
+Generally, if a distribution is following an LTS kernel, it should work well with OpenZFS.
+
+## FreeBSD
+
+All FreeBSD releases receiving [security support](https://www.freebsd.org/security/#sup) are supported by OpenZFS.
+
+**Supported FreeBSD releases**: **15.0**, **14.4**.

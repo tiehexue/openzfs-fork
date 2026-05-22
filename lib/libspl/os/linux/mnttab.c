@@ -45,23 +45,6 @@
 
 static __thread char buf[BUFSIZE];
 
-#define	DIFF(xx)	( \
-	    (mrefp->xx != NULL) && \
-	    (mgetp->xx == NULL || strcmp(mrefp->xx, mgetp->xx) != 0))
-
-int
-getmntany(FILE *fp, struct mnttab *mgetp, struct mnttab *mrefp)
-{
-	int ret;
-
-	while (
-	    ((ret = _sol_getmntent(fp, mgetp)) == 0) && (
-	    DIFF(mnt_special) || DIFF(mnt_mountp) ||
-	    DIFF(mnt_fstype) || DIFF(mnt_mntopts))) { }
-
-	return (ret);
-}
-
 int
 _sol_getmntent(FILE *fp, struct mnttab *mgetp)
 {
@@ -85,7 +68,7 @@ _sol_getmntent(FILE *fp, struct mnttab *mgetp)
 }
 
 static int
-getextmntent_impl(FILE *fp, struct extmnttab *mp, uint64_t *mnt_id)
+getextmntent_impl(FILE *fp, struct mnttab *mp, uint64_t *mnt_id, dev_t *dev)
 {
 	int ret;
 	struct stat64 st;
@@ -101,19 +84,17 @@ getextmntent_impl(FILE *fp, struct extmnttab *mp, uint64_t *mnt_id)
 			*mnt_id = stx.stx_mnt_id;
 #endif
 		if (stat64(mp->mnt_mountp, &st) != 0) {
-			mp->mnt_major = 0;
-			mp->mnt_minor = 0;
+			*dev = 0;
 			return (ret);
 		}
-		mp->mnt_major = major(st.st_dev);
-		mp->mnt_minor = minor(st.st_dev);
+		*dev = st.st_dev;
 	}
 
 	return (ret);
 }
 
 int
-getextmntent(const char *path, struct extmnttab *entry, struct stat64 *statbuf)
+getextmntent(const char *path, struct mnttab *entry, struct stat64 *statbuf)
 {
 	struct stat64 st;
 	FILE *fp;
@@ -121,6 +102,7 @@ getextmntent(const char *path, struct extmnttab *entry, struct stat64 *statbuf)
 	boolean_t have_mnt_id = B_FALSE;
 	uint64_t target_mnt_id = 0;
 	uint64_t entry_mnt_id;
+	dev_t dev;
 #ifdef HAVE_STATX_MNT_ID
 	struct statx stx;
 #endif
@@ -143,7 +125,14 @@ getextmntent(const char *path, struct extmnttab *entry, struct stat64 *statbuf)
 	}
 
 #ifdef HAVE_STATX_MNT_ID
-	if (statx(AT_FDCWD, path, AT_STATX_SYNC_AS_STAT | AT_SYMLINK_NOFOLLOW,
+	/*
+	 * Use AT_STATX_SYNC_AS_STAT without AT_SYMLINK_NOFOLLOW so that
+	 * symlinks are followed, matching the behavior of stat64() above.
+	 * Without this, if path is a symlink crossing a mount boundary,
+	 * statx() returns the mnt_id of the symlink's location rather
+	 * than the symlink target's mount.
+	 */
+	if (statx(AT_FDCWD, path, AT_STATX_SYNC_AS_STAT,
 	    STATX_MNT_ID, &stx) == 0 && (stx.stx_mask & STATX_MNT_ID)) {
 		have_mnt_id = B_TRUE;
 		target_mnt_id = stx.stx_mnt_id;
@@ -160,12 +149,11 @@ getextmntent(const char *path, struct extmnttab *entry, struct stat64 *statbuf)
 	 */
 
 	match = 0;
-	while (getextmntent_impl(fp, entry, &entry_mnt_id) == 0) {
+	while (getextmntent_impl(fp, entry, &entry_mnt_id, &dev) == 0) {
 		if (have_mnt_id) {
 			match = (entry_mnt_id == target_mnt_id);
 		} else {
-			match = makedev(entry->mnt_major, entry->mnt_minor) ==
-			    statbuf->st_dev;
+			match = (dev == statbuf->st_dev);
 		}
 		if (match)
 			break;
@@ -178,11 +166,8 @@ getextmntent(const char *path, struct extmnttab *entry, struct stat64 *statbuf)
 		return (-1);
 	}
 
-	if (stat64(entry->mnt_mountp, &st) != 0) {
-		entry->mnt_major = 0;
-		entry->mnt_minor = 0;
+	if (stat64(entry->mnt_mountp, &st) != 0)
 		return (-1);
-	}
 
 	return (0);
 }
