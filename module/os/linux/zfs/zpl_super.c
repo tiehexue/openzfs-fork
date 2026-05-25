@@ -613,13 +613,29 @@ static const struct fs_parameter_spec zpl_param_spec[] = {
 	{}
 };
 
+/*
+ * In 5.4.0-216, fs_parse() took a struct fs_parameter_description
+ * which wraps the parameter specs with name and enum pointers. From 5.6,
+ * the description struct was removed and fs_parse() accepts the
+ * fs_parameter_spec directly.
+ */
+#ifndef HAVE_FS_PARSE_TAKES_SPEC
+static const struct fs_parameter_description zpl_param_desc = {
+	.name = "zfs",
+	.specs = zpl_param_spec,
+};
+#define	ZPL_PARAM_FS_PARSE	(&zpl_param_desc)
+#else
+#define	ZPL_PARAM_FS_PARSE	(zpl_param_spec)
+#endif
+
 static int
 zpl_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
 	vfs_t *vfs = fc->fs_private;
 
 	struct fs_parse_result result;
-	int opt = fs_parse(fc, zpl_param_spec, param, &result);
+	int opt = fs_parse(fc, ZPL_PARAM_FS_PARSE, param, &result);
 	if (opt == -ENOPARAM) {
 		/*
 		 * Convert unknowns to warnings, to work around the whole
@@ -803,7 +819,7 @@ zpl_parse_monolithic(struct fs_context *fc, void *data)
 
 		/* Check if this is one of our options. */
 		struct fs_parse_result result;
-		int opt = fs_parse(fc, zpl_param_spec, &param, &result);
+		int opt = fs_parse(fc, ZPL_PARAM_FS_PARSE, &param, &result);
 		if (opt >= 0) {
 			/*
 			 * We already know this one of our options, so a
