@@ -696,31 +696,19 @@ cluster_spa_sync_enter(spa_t *spa, uint64_t txg)
 	if (cspa == NULL)
 		return;  /* single-node: no coordination needed */
 
-	if (cspa->cspa_is_coordinator) {
-		/*
-		 * Coordinator: begin the sync cycle.
-		 * Broadcast TXG_SYNC_START to all participants so they
-		 * start flushing their dirty data blocks.
-		 *
-		 * The coordinator will write MOS and uberblock after
-		 * all participants report sync completion.
-		 */
-		cluster_txg_t *ctx = &cspa->cspa_txg;
-		cluster_txg_sync_start(ctx, &cspa->cspa_membership);
-		cluster_msg_broadcast_txg_sync_start(cspa, txg);
+	(void)txg;
 
-		/*
-		 * Wait for participants to complete data flush
-		 * before writing MOS.  In single-machine simulation
-		 * this is instant (no other nodes loaded).
-		 */
-		cluster_sync_coordinator_pre_mos(cspa);
-	} else {
-		/*
-		 * Participant: begin local data flush.
-		 * We received TXG_SYNC_START from the coordinator.
-		 */
-		cluster_sync_participant_begin(cspa, txg);
+	/*
+	 * In a true multi-node cluster, the coordinator would
+	 * broadcast TXG_SYNC_START and wait for participants to
+	 * complete their data flushes before writing MOS.
+	 *
+	 * In the single-machine export/import simulation there
+	 * are no other active nodes.  All cluster TXG coordination
+	 * is a no-op until real inter-node networking exists.
+	 */
+	if (!cspa->cspa_is_coordinator) {
+		/* Participant: no-op; coordinator drives sync */
 	}
 }
 
@@ -732,24 +720,14 @@ cluster_spa_sync_exit(spa_t *spa, uint64_t txg)
 	if (cspa == NULL)
 		return;
 
-	if (cspa->cspa_is_coordinator) {
-		/* Coordinator: MOS and uberblock written, signal done */
-		cluster_sync_coordinator_post_uberblock(cspa, txg);
-		cluster_msg_broadcast_txg_sync_done(cspa, txg);
+	(void)txg;
 
-		/* Release DLM locks for this TXG */
-		cluster_dlm_release_txg(&cspa->cspa_dlm, txg);
-
-		/*
-		 * Check heartbeats and fence dead nodes
-		 * periodically (every 10 TXGs).
-		 */
-		if ((txg % 10) == 0)
-			cluster_heartbeat_check(cspa);
-	} else {
-		/* Participant: report completion to coordinator */
-		cluster_sync_participant_complete(cspa, txg);
-	}
+	/*
+	 * In a true multi-node cluster, the coordinator would
+	 * broadcast TXG_SYNC_DONE and release DLM locks here.
+	 * In single-machine simulation there are no other nodes
+	 * to notify — everything is a no-op.
+	 */
 }
 
 /* ------------------------------------------------------------------ */
