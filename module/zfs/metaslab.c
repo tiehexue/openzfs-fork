@@ -41,6 +41,7 @@
 #include <sys/vdev_indirect_mapping.h>
 #include <sys/zap.h>
 #include <sys/btree.h>
+#include <sys/cluster/cluster_metaslab.h>
 
 #define	GANG_ALLOCATION(flags) \
 	((flags) & (METASLAB_GANG_CHILD | METASLAB_GANG_HEADER))
@@ -4947,6 +4948,18 @@ find_valid_metaslab(metaslab_group_t *mg, uint64_t activation_weight,
 		 * hasn't gone through a metaslab_sync_done(), then skip it.
 		 */
 		if (msp->ms_condensing || msp->ms_disabled > 0 || msp->ms_new)
+			continue;
+
+		/*
+		 * Cluster: skip metaslabs not owned by this node.
+		 * In cluster mode, each metaslab is assigned to exactly
+		 * one node. Only the owning node can allocate from it.
+		 * This check is defense-in-depth; the ms_disabled
+		 * mechanism above should already exclude non-owned
+		 * metaslabs when cluster mode updates metaslab state.
+		 */
+		if (mg->mg_vd->vdev_spa->spa_cluster != NULL &&
+		    !cluster_metaslab_owns(mg->mg_vd->vdev_spa, msp))
 			continue;
 
 		*was_active = msp->ms_allocator != -1;

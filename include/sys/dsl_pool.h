@@ -159,6 +159,7 @@ void dsl_pool_close(dsl_pool_t *dp);
 dsl_pool_t *dsl_pool_create(spa_t *spa, nvlist_t *zplprops,
     struct dsl_crypto_params *dcp, uint64_t txg);
 void dsl_pool_sync(dsl_pool_t *dp, uint64_t txg);
+void dsl_pool_sync_data_only(dsl_pool_t *dp, uint64_t txg);
 void dsl_pool_sync_done(dsl_pool_t *dp, uint64_t txg);
 int dsl_pool_sync_context(dsl_pool_t *dp);
 uint64_t dsl_pool_adjustedsize(dsl_pool_t *dp, zfs_space_check_t slop_policy);

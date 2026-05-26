@@ -36,6 +36,8 @@
 #include <sys/zil.h>
 #include <sys/callb.h>
 #include <sys/trace_zfs.h>
+#include <sys/cluster/cluster_txg.h>
+#include <sys/cluster/cluster_spa.h>
 
 /*
  * ZFS Transaction Groups
@@ -597,6 +599,18 @@ txg_sync_thread(void *arg)
 		    (u_longlong_t)tx->tx_sync_txg_waiting);
 		mutex_exit(&tx->tx_sync_lock);
 
+		/*
+		 * Cluster: In cluster mode, participant nodes wait for
+		 * the coordinator's TXG_SYNC_START message before
+		 * syncing. The coordinator ensures all participants have
+		 * quiesced before broadcasting SYNC_START.
+		 */
+		if (spa->spa_cluster != NULL &&
+		    !cluster_spa_is_coordinator(spa)) {
+			cluster_txg_wait_sync_start(
+			    spa->spa_cluster, txg);
+		}
+
 		txg_stat_t *ts = spa_txg_history_init_io(spa, txg, dp);
 		start = ddi_get_lbolt();
 		spa_sync(spa, txg);
@@ -608,6 +622,17 @@ txg_sync_thread(void *arg)
 		tx->tx_syncing_txg = 0;
 		DTRACE_PROBE2(txg__synced, dsl_pool_t *, dp, uint64_t, txg);
 		cv_broadcast(&tx->tx_sync_done_cv);
+
+		/*
+		 * Cluster: Coordinator notifies all participants that
+		 * the TXG sync is complete. Participants can then
+		 * advance their local state and start the next TXG.
+		 */
+		if (spa->spa_cluster != NULL &&
+		    cluster_spa_is_coordinator(spa)) {
+			cluster_txg_broadcast_sync_done(
+			    spa->spa_cluster, txg);
+		}
 
 		/*
 		 * Dispatch commit callbacks to worker threads.
@@ -650,9 +675,27 @@ txg_quiesce_thread(void *arg)
 		    (u_longlong_t)tx->tx_sync_txg_waiting);
 		tx->tx_quiescing_txg = txg;
 
-		mutex_exit(&tx->tx_sync_lock);
-		txg_quiesce(dp, txg);
-		mutex_enter(&tx->tx_sync_lock);
+		/*
+		 * Cluster: In cluster mode, participant nodes wait for
+		 * the coordinator's TXG_QUIESCE message before quiescing.
+		 * The coordinator drives the TXG state machine and
+		 * broadcasts when each TXG should transition.
+		 * On participants, the local quiesce thread still runs
+		 * but the actual quiesce is deferred until the
+		 * coordinator signals it.
+		 */
+		if (dp->dp_spa->spa_cluster != NULL &&
+		    !cluster_spa_is_coordinator(dp->dp_spa)) {
+			mutex_exit(&tx->tx_sync_lock);
+			cluster_txg_wait_quiesce(dp->dp_spa->spa_cluster,
+			    txg);
+			txg_quiesce(dp, txg);
+			mutex_enter(&tx->tx_sync_lock);
+		} else {
+			mutex_exit(&tx->tx_sync_lock);
+			txg_quiesce(dp, txg);
+			mutex_enter(&tx->tx_sync_lock);
+		}
 
 		/*
 		 * Hand this txg off to the sync thread.

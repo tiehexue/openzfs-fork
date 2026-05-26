@@ -154,6 +154,9 @@
 #include <sys/fs/zfs.h>
 #include <sys/byteorder.h>
 #include <sys/zfs_bootenv.h>
+#include <sys/cluster/cluster_spa.h>
+#include <sys/cluster/cluster_sync.h>
+#include <sys/cluster/cluster_heartbeat.h>
 
 /*
  * Basic routines to read and write from a vdev label.
@@ -2065,6 +2068,15 @@ vdev_config_sync(vdev_t **svd, int svdcount, uint64_t txg)
 	int flags = ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL;
 
 	ASSERT(svdcount != 0);
+
+	/*
+	 * Cluster: In cluster mode, only the coordinator writes
+	 * uberblocks and vdev labels. Participant nodes skip this
+	 * entirely to avoid write conflicts on shared disks.
+	 */
+	if (spa->spa_cluster != NULL && !cluster_spa_is_coordinator(spa))
+		return (0);
+
 retry:
 	/*
 	 * Normally, we don't want to try too hard to write every label and
@@ -2091,6 +2103,14 @@ retry:
 	if (ub->ub_txg < txg) {
 		boolean_t changed = uberblock_update(ub, spa->spa_root_vdev,
 		    txg, spa->spa_mmp.mmp_delay);
+
+		/*
+		 * Cluster: encode node identity and epoch into the
+		 * uberblock MMP fields so other nodes can identify
+		 * the writer during import.
+		 */
+		if (spa->spa_cluster != NULL)
+			cluster_heartbeat_encode_ub(spa, ub);
 
 		if (!changed && list_is_empty(&spa->spa_config_dirty_list) &&
 		    !spa_multihost(spa))

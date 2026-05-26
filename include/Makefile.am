@@ -155,6 +155,18 @@ COMMON_H = \
 	sys/zrlock.h \
 	sys/zthr.h \
 	\
+	sys/cluster/cluster_dlm.h \
+	sys/cluster/cluster_heartbeat.h \
+	sys/cluster/cluster_membership.h \
+	sys/cluster/cluster_messaging.h \
+	sys/cluster/cluster_metaslab.h \
+	sys/cluster/cluster_recovery.h \
+	sys/cluster/cluster_spa.h \
+	sys/cluster/cluster_sync.h \
+	sys/cluster/cluster_txg.h \
+	sys/cluster/cluster_types.h \
+	sys/cluster/cluster_zil.h \
+	\
 	sys/crypto/api.h \
 	sys/crypto/common.h \
 	sys/crypto/icp.h \

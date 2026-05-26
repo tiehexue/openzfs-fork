@@ -51,6 +51,7 @@
 #include <sys/dsl_userhold.h>
 #include <sys/trace_zfs.h>
 #include <sys/mmp.h>
+#include <sys/cluster/cluster_spa.h>
 
 /*
  * ZFS Write Throttle
@@ -593,6 +594,32 @@ dsl_pool_sync_mos(dsl_pool_t *dp, dmu_tx_t *tx)
 	spa_set_rootblkptr(dp->dp_spa, &dp->dp_meta_rootbp);
 }
 
+/*
+ * Cluster: Sync only user data, skipping MOS and pool metadata.
+ * This is used by participant nodes in cluster mode, which only
+ * flush their local dirty data blocks to shared disks. The MOS
+ * and uberblock are written exclusively by the coordinator.
+ *
+ * In practice, participant nodes go through the normal dsl_pool_sync()
+ * path, but with guards to skip MOS writes and sync tasks. This
+ * function is provided as an explicit alternative if a more
+ * lightweight participant sync path is desired.
+ */
+void
+dsl_pool_sync_data_only(dsl_pool_t *dp, uint64_t txg)
+{
+	zio_t *rio;
+	dsl_dataset_t *ds;
+
+	rio = zio_root(dp->dp_spa, NULL, NULL, ZIO_FLAG_MUSTSUCCEED);
+	while ((ds = txg_list_remove(&dp->dp_dirty_datasets, txg)) != NULL) {
+		dmu_tx_t *tx = dmu_tx_create_assigned(dp, txg);
+		dsl_dataset_sync(ds, rio, tx);
+		dmu_tx_commit(tx);
+	}
+	VERIFY0(zio_wait(rio));
+}
+
 static void
 dsl_pool_dirty_delta(dsl_pool_t *dp, int64_t delta)
 {
@@ -815,7 +842,17 @@ dsl_pool_sync(dsl_pool_t *dp, uint64_t txg)
 	}
 
 	if (dmu_objset_is_dirty(mos, txg)) {
-		dsl_pool_sync_mos(dp, tx);
+		/*
+		 * Cluster: only the coordinator writes the MOS.
+		 * Participants forward metadata changes to the
+		 * coordinator via the cluster network. However,
+		 * if no coordinator is active (auto-promoted),
+		 * we write MOS ourselves.
+		 */
+		if (dp->dp_spa->spa_cluster == NULL ||
+		    cluster_spa_is_coordinator(dp->dp_spa)) {
+			dsl_pool_sync_mos(dp, tx);
+		}
 	}
 
 	/*
@@ -849,8 +886,24 @@ dsl_pool_sync(dsl_pool_t *dp, uint64_t txg)
 		 * were syncing.
 		 */
 		ASSERT3U(spa_sync_pass(dp->dp_spa), ==, 1);
-		while ((dst = txg_list_remove(&dp->dp_sync_tasks, txg)) != NULL)
+		/*
+		 * Cluster: Participants should not execute sync tasks
+		 * that modify pool metadata (MOS). These must be
+		 * deferred to the coordinator. However, on the
+		 * coordinator, we process them normally.
+		 */
+		while ((dst = txg_list_remove(&dp->dp_sync_tasks, txg)) != NULL) {
+			if (dp->dp_spa->spa_cluster != NULL &&
+			    !cluster_spa_is_coordinator(dp->dp_spa)) {
+				/*
+				 * Participant: defer sync tasks to
+				 * coordinator.  Unless auto-promoted
+				 * due to coordinator being unreachable.
+				 */
+				continue;
+			}
 			dsl_sync_task_sync(dst, tx);
+		}
 	}
 
 	dmu_tx_commit(tx);

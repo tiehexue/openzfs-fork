@@ -35,12 +35,14 @@
 #include <sys/dsl_dir.h>
 #include <sys/dsl_pool.h>
 #include <sys/zap_impl.h>
-#include <sys/spa.h>
+#include <sys/spa_impl.h>
 #include <sys/brt_impl.h>
 #include <sys/sa.h>
 #include <sys/sa_impl.h>
 #include <sys/zfs_context.h>
 #include <sys/trace_zfs.h>
+#include <sys/cluster/cluster_txg.h>
+#include <sys/cluster/cluster_spa.h>
 
 typedef void (*dmu_tx_hold_func_t)(dmu_tx_t *tx, struct dnode *dn,
     uint64_t arg1, uint64_t arg2);
@@ -1146,6 +1148,17 @@ dmu_tx_try_assign(dmu_tx_t *tx)
 	}
 
 	DMU_TX_STAT_BUMP(dmu_tx_assigned);
+
+	/*
+	 * Cluster: Report estimated dirty data to the cluster TXG
+	 * coordinator. This allows the coordinator to track per-node
+	 * dirty amounts and make informed decisions about when to
+	 * trigger quiesce/sync across the cluster.
+	 */
+	if (spa->spa_cluster != NULL) {
+		cluster_txg_report_dirty(&spa->spa_cluster->cspa_txg,
+		    spa->spa_cluster->cspa_local_id, asize);
+	}
 
 	return (0);
 }

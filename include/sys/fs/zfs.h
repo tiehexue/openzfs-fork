@@ -333,6 +333,16 @@ typedef enum {
 	ZPOOL_PROP_SELOG_USED,
 	ZPOOL_PROP_SELOG_EXPANDSZ,
 	ZPOOL_PROP_SELOG_FRAGMENTATION,
+
+	/* Cluster ZFS properties */
+	ZPOOL_PROP_CLUSTER_MODE,		/* cluster mode: on|off */
+	ZPOOL_PROP_CLUSTER_NODE_ID,		/* this node's cluster ID */
+	ZPOOL_PROP_CLUSTER_NODES,		/* max cluster nodes */
+	ZPOOL_PROP_CLUSTER_MS_POLICY,		/* metaslab partitioning policy */
+	ZPOOL_PROP_CLUSTER_HB_INTERVAL,	/* heartbeat interval (ms) */
+	ZPOOL_PROP_CLUSTER_HB_TIMEOUT,	/* heartbeat timeout (ms) */
+	ZPOOL_PROP_CLUSTER_EPOCH,		/* cluster membership epoch (ro) */
+	ZPOOL_PROP_CLUSTER_COORDINATOR,	/* coordinator node ID (ro) */
 	ZPOOL_NUM_PROPS
 } zpool_prop_t;
 

@@ -6,6 +6,7 @@ libzpool_la_CFLAGS += $(ZLIB_CFLAGS)
 
 libzpool_la_CPPFLAGS  = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
 libzpool_la_CPPFLAGS += -DLIB_ZPOOL_BUILD
+libzpool_la_CPPFLAGS += -I$(srcdir)/module/zfs/cluster
 
 lib_LTLIBRARIES += libzpool.la
 CPPCHECKTARGETS += libzpool.la
@@ -195,7 +196,18 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/zio_inject.c \
 	module/zfs/zle.c \
 	module/zfs/zrlock.c \
-	module/zfs/zthr.c
+	module/zfs/zthr.c \
+	\
+	module/zfs/cluster/cluster_membership.c \
+	module/zfs/cluster/cluster_txg.c \
+	module/zfs/cluster/cluster_metaslab.c \
+	module/zfs/cluster/cluster_dlm.c \
+	module/zfs/cluster/cluster_sync.c \
+	module/zfs/cluster/cluster_zil.c \
+	module/zfs/cluster/cluster_recovery.c \
+	module/zfs/cluster/cluster_spa.c \
+	module/zfs/cluster/cluster_messaging.c \
+	module/zfs/cluster/cluster_heartbeat.c
 
 # Special case:
 #

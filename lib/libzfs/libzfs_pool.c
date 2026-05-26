@@ -59,6 +59,10 @@
 #include "zfs_comutil.h"
 #include "zfeature_common.h"
 
+#ifndef	CLUSTER_MAX_NODES
+#define	CLUSTER_MAX_NODES	32
+#endif
+
 static boolean_t zpool_vdev_is_interior(const char *name);
 
 typedef struct prop_flags {
@@ -936,6 +940,32 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
 		case ZPOOL_PROP_DEDUPDITTO:
 			printf("Note: property '%s' no longer has "
 			    "any effect\n", propname);
+			break;
+
+		case ZPOOL_PROP_CLUSTER_MODE:
+			/* cluster=on requires multihost too */
+			break;
+		case ZPOOL_PROP_CLUSTER_NODE_ID:
+			if (intval >= CLUSTER_MAX_NODES) {
+				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				    "cluster_node must be 0-%u"),
+				    CLUSTER_MAX_NODES - 1);
+				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
+				goto error;
+			}
+			break;
+		case ZPOOL_PROP_CLUSTER_NODES:
+			if (intval < 1 || intval > CLUSTER_MAX_NODES) {
+				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				    "cluster_nodes must be 1-%u"),
+				    CLUSTER_MAX_NODES);
+				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
+				goto error;
+			}
+			break;
+		case ZPOOL_PROP_CLUSTER_MS_POLICY:
+		case ZPOOL_PROP_CLUSTER_HB_INTERVAL:
+		case ZPOOL_PROP_CLUSTER_HB_TIMEOUT:
 			break;
 
 		default:

@@ -58,6 +58,13 @@
 
 #include "zfs_crrd.h"
 
+/*
+ * Cluster ZFS: Forward declaration for cluster state.
+ * Full definition in sys/cluster/cluster_types.h
+ */
+struct cluster_spa;
+typedef struct cluster_spa cluster_spa_t;
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -468,6 +475,7 @@ struct spa {
 	list_t		spa_leaf_list;		/* list of leaf vdevs */
 	uint64_t	spa_leaf_list_gen;	/* track leaf_list changes */
 	uint32_t	spa_hostid;		/* cached system hostid */
+	cluster_spa_t	*spa_cluster;		/* cluster state (NULL=single) */
 
 	/* synchronization for threads in spa_wait */
 	kmutex_t	spa_activities_lock;

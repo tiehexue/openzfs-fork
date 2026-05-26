@@ -32,6 +32,8 @@
 #include <sys/vdev_impl.h>
 #include <sys/zfs_context.h>
 #include <sys/callb.h>
+#include <sys/cluster/cluster_spa.h>
+#include <sys/cluster/cluster_membership.h>
 
 /*
  * Multi-Modifier Protection (MMP) attempts to prevent a user from importing
@@ -522,6 +524,26 @@ mmp_write_uberblock(spa_t *spa)
 	    MMP_INTERVAL_SET(MMP_INTERVAL_OK(zfs_multihost_interval)) |
 	    MMP_FAIL_INT_SET(MMP_FAIL_INTVS_OK(
 	    zfs_multihost_fail_intervals));
+
+	/*
+	 * Cluster: Include this node's ID and cluster epoch in the MMP
+	 * write so that other nodes can identify which cluster node
+	 * wrote this uberblock and detect fenced nodes.
+	 *
+	 * Encoding (in ub_mmp_config):
+	 *   bits  0-31  : MMP sequence number (standard)
+	 *   bits 32-47  : cluster node ID
+	 *   bits 48-63  : cluster membership epoch
+	 */
+	if (spa->spa_cluster != NULL) {
+		cluster_spa_t *cspa = spa->spa_cluster;
+		ub->ub_mmp_config |=
+		    ((uint64_t)(cspa->cspa_local_id & 0xFFFF)) << 32;
+		ub->ub_mmp_config |=
+		    ((uint64_t)(cspa->cspa_membership.cm_epoch & 0xFFFF))
+		    << 48;
+	}
+
 	vd->vdev_mmp_pending = gethrtime();
 	vd->vdev_mmp_kstat_id = mmp->mmp_kstat_id;
 

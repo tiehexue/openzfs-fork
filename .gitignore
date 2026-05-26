@@ -88,3 +88,4 @@ changelog
 *.orig
 *.tmp
 *.log
+contrib/pyzfs/.eggs/

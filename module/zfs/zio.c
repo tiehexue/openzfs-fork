@@ -54,6 +54,9 @@
 #include <sys/abd.h>
 #include <sys/dsl_crypt.h>
 #include <cityhash.h>
+#include <sys/cluster/cluster_zil.h>
+#include <sys/cluster/cluster_spa.h>
+#include <sys/cluster/cluster_membership.h>
 
 /*
  * ==========================================================================
@@ -4514,6 +4517,35 @@ zio_alloc_zil(spa_t *spa, objset_t *os, uint64_t txg, blkptr_t *new_bp,
 	metaslab_trace_init(&io_alloc_list);
 
 	/*
+	 * Cluster: In cluster mode, try to allocate ZIL blocks from
+	 * this node's reserved SLOG region first. This ensures each
+	 * node's ZIL writes go to a disjoint region, preventing
+	 * write conflicts on shared SLOG devices.
+	 */
+	if (spa->spa_cluster != NULL) {
+		error = cluster_zil_alloc_block(spa->spa_cluster, os, txg,
+		    new_bp, min_size, max_size, slog);
+		if (error == 0) {
+			metaslab_trace_fini(&io_alloc_list);
+			alloc_size = P2ALIGN_TYPED(max_size, ZIL_MIN_BLKSZ,
+			    uint64_t);
+			BP_SET_LSIZE(new_bp, alloc_size);
+			BP_SET_PSIZE(new_bp, alloc_size);
+			BP_SET_COMPRESS(new_bp, ZIO_COMPRESS_OFF);
+			BP_SET_CHECKSUM(new_bp,
+			    spa_version(spa) >= SPA_VERSION_SLIM_ZIL
+			    ? ZIO_CHECKSUM_ZILOG2 : ZIO_CHECKSUM_ZILOG);
+			BP_SET_TYPE(new_bp, DMU_OT_INTENT_LOG);
+			BP_SET_LEVEL(new_bp, 0);
+			BP_SET_DEDUP(new_bp, 0);
+			BP_SET_BYTEORDER(new_bp, ZFS_HOST_BYTEORDER);
+			return (0);
+		}
+		/* Fall through to normal allocation if cluster ZIL fails */
+		error = 0;
+	}
+
+	/*
 	 * Block pointer fields are useful to metaslabs for stats and debugging.
 	 * Fill in the obvious ones before calling into metaslab_alloc().
 	 */
@@ -4639,6 +4671,35 @@ zio_vdev_io_start(zio_t *zio)
 
 	ASSERT0(zio->io_error);
 	ASSERT0(zio->io_child_error[ZIO_CHILD_VDEV]);
+
+	/*
+	 * Cluster: Fencing check. If this node has been fenced,
+	 * reject all write I/O immediately. Reads are still
+	 * permitted (they don't modify shared state).  A fenced
+	 * node must suspend I/O to prevent corrupting pool data.
+	 *
+	 * The fencing state is set by the coordinator via
+	 * cluster_membership_fence_node() and persisted in MOS.
+	 * Each node checks its own fenced status before issuing I/O.
+	 */
+	if (spa->spa_cluster != NULL) {
+		cluster_spa_t *cspa = spa->spa_cluster;
+		if (!cspa->cspa_is_coordinator) {
+			cluster_node_t *self =
+			    cluster_membership_find(
+			    &cspa->cspa_membership,
+			    cspa->cspa_local_id);
+			if (self != NULL && self->cn_fenced &&
+			    (zio->io_type == ZIO_TYPE_WRITE)) {
+				zio->io_error = SET_ERROR(EPERM);
+				zfs_dbgmsg("cluster: fenced node %u "
+				    "write rejected on vdev %llu",
+				    cspa->cspa_local_id,
+				    (u_longlong_t)(vd ? vd->vdev_guid : 0));
+				return (zio);
+			}
+		}
+	}
 
 	if (vd == NULL) {
 		if (!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER)) {

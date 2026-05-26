@@ -446,6 +446,18 @@ ZFS_OBJS := \
 	zthr.o \
 	zvol.o
 
+CLUSTER_OBJS := \
+	cluster/cluster_dlm.o \
+	cluster/cluster_heartbeat.o \
+	cluster/cluster_membership.o \
+	cluster/cluster_messaging.o \
+	cluster/cluster_metaslab.o \
+	cluster/cluster_recovery.o \
+	cluster/cluster_spa.o \
+	cluster/cluster_sync.o \
+	cluster/cluster_txg.o \
+	cluster/cluster_zil.o
+
 ZFS_OBJS_OS := \
 	abd_os.o \
 	arc_os.o \
@@ -496,7 +508,7 @@ ZFS_OBJS_ARM64 := \
 ZFS_OBJS_PPC_PPC64 := \
 	vdev_raidz_math_powerpc_altivec.o
 
-zfs-objs            += $(addprefix zfs/,$(ZFS_OBJS)) $(addprefix os/linux/zfs/,$(ZFS_OBJS_OS))
+zfs-objs            += $(addprefix zfs/,$(ZFS_OBJS)) $(addprefix os/linux/zfs/,$(ZFS_OBJS_OS)) $(addprefix zfs/,$(CLUSTER_OBJS))
 zfs-$(CONFIG_X86)   += $(addprefix zfs/,$(ZFS_OBJS_X86))
 zfs-$(CONFIG_UML_X86)+= $(addprefix zfs/,$(ZFS_OBJS_X86))
 zfs-$(CONFIG_ARM64) += $(addprefix zfs/,$(ZFS_OBJS_ARM64))

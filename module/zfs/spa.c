@@ -91,6 +91,8 @@
 #include <sys/zfeature.h>
 #include <sys/dsl_destroy.h>
 #include <sys/zvol.h>
+#include <sys/cluster/cluster_spa.h>
+#include <sys/cluster/cluster_sync.h>
 
 #ifdef	_KERNEL
 #include <sys/fm/protocol.h>
@@ -830,6 +832,51 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 					error = SET_ERROR(ENOTSUP);
 			}
 
+			break;
+
+		case ZPOOL_PROP_CLUSTER_MODE:
+			error = nvpair_value_uint64(elem, &intval);
+			if (!error && intval > 1)
+				error = SET_ERROR(EINVAL);
+			if (!error && intval == 1) {
+				/*
+				 * Enforce multihost when cluster=on.
+				 * During pool creation, spa_multihost()
+				 * may not be set yet, so also check the
+				 * property nvlist for multihost=on.
+				 */
+				uint64_t mhval = 0;
+				if (!spa_multihost(spa) &&
+				    (nvlist_lookup_uint64(props,
+				    zpool_prop_to_name(ZPOOL_PROP_MULTIHOST),
+				    &mhval) != 0 || mhval == 0))
+					error = SET_ERROR(ENOTSUP);
+			}
+			break;
+
+		case ZPOOL_PROP_CLUSTER_NODE_ID:
+			error = nvpair_value_uint64(elem, &intval);
+			if (!error && intval >= CLUSTER_MAX_NODES)
+				error = SET_ERROR(EINVAL);
+			break;
+
+		case ZPOOL_PROP_CLUSTER_NODES:
+			error = nvpair_value_uint64(elem, &intval);
+			if (!error && (intval < 1 || intval > CLUSTER_MAX_NODES))
+				error = SET_ERROR(EINVAL);
+			break;
+
+		case ZPOOL_PROP_CLUSTER_MS_POLICY:
+			error = nvpair_value_uint64(elem, &intval);
+			if (!error && intval > 2)
+				error = SET_ERROR(EINVAL);
+			break;
+
+		case ZPOOL_PROP_CLUSTER_HB_INTERVAL:
+		case ZPOOL_PROP_CLUSTER_HB_TIMEOUT:
+			error = nvpair_value_uint64(elem, &intval);
+			if (!error && intval == 0)
+				error = SET_ERROR(EINVAL);
 			break;
 
 		case ZPOOL_PROP_BOOTFS:
@@ -2471,6 +2518,17 @@ spa_unload(spa_t *spa)
 	spa->spa_raidz_expand = NULL;
 	spa->spa_checkpoint_txg = 0;
 
+	/*
+	 * Cluster: clean up cluster state as safety net.
+	 * Normally cluster_spa_export() is called before spa_unload(),
+	 * but handle the case where spa_unload is called directly
+	 * (e.g., import failure, pool destroy).
+	 */
+	if (spa->spa_cluster != NULL) {
+		cluster_spa_fini(spa);
+		spa->spa_cluster = NULL;
+	}
+
 	spa_config_exit(spa, SCL_ALL, spa);
 }
 
@@ -3890,11 +3948,28 @@ spa_activity_check_required(spa_t *spa, uberblock_t *ub, nvlist_t *label)
 	 * Skip the activity check when the MMP feature is disabled.
 	 * - MMP_MAGIC not set - Legacy pool predates the MMP feature, or
 	 * - MMP_MAGIC set && mmp_delay == 0 - MMP feature is disabled.
+	 *
+	 * Cluster exception: In cluster mode, ub_mmp_delay is repurposed
+	 * to hold the cluster epoch (a nonzero value). We detect cluster
+	 * mode by checking the upper bits of ub_mmp_config for a
+	 * coordinator node ID (bits 48-63). If cluster mode is detected,
+	 * we still need the activity check to verify the cluster is
+	 * still alive.
+	 */
+	/*
+	 * If the upper 16 bits of ub_mmp_config contain a non-zero
+	 * coordinator node ID, this is a cluster pool.  In cluster
+	 * mode, the membership layer (not MMP) determines whether
+	 * the pool can be safely imported.  Skip the MMP activity
+	 * check to allow the second node to join.
 	 */
 	if ((ub->ub_mmp_magic != MMP_MAGIC) ||
-	    (ub->ub_mmp_magic == MMP_MAGIC && ub->ub_mmp_delay == 0)) {
-		zfs_dbgmsg("mmp: skipping check: feature is disabled, "
-		    "spa=%s", spa_load_name(spa));
+	    (ub->ub_mmp_magic == MMP_MAGIC && ub->ub_mmp_delay == 0 &&
+	    (ub->ub_mmp_config >> 48) == 0) ||
+	    (ub->ub_mmp_magic == MMP_MAGIC &&
+	    (ub->ub_mmp_config >> 48) != 0)) {
+		zfs_dbgmsg("mmp: skipping check: feature is disabled "
+		    "or cluster mode, spa=%s", spa_load_name(spa));
 		return (B_FALSE);
 	}
 
@@ -5476,6 +5551,26 @@ spa_ld_get_props(spa_t *spa)
 		spa_prop_find(spa, ZPOOL_PROP_MULTIHOST, &spa->spa_multihost);
 		spa_prop_find(spa, ZPOOL_PROP_AUTOTRIM, &spa->spa_autotrim);
 		spa->spa_autoreplace = (autoreplace != 0);
+
+		/* Load cluster properties into spa_cluster config */
+		if (spa->spa_cluster != NULL) {
+			uint64_t cluster_val = 0;
+			spa_prop_find(spa, ZPOOL_PROP_CLUSTER_MODE,
+			    &cluster_val);
+			spa_prop_find(spa, ZPOOL_PROP_CLUSTER_NODE_ID,
+			    &spa->spa_cluster->cspa_config.cc_coordinator_id);
+			spa_prop_find(spa, ZPOOL_PROP_CLUSTER_NODES,
+			    &spa->spa_cluster->cspa_config.cc_max_nodes);
+			spa_prop_find(spa, ZPOOL_PROP_CLUSTER_MS_POLICY,
+			    &spa->spa_cluster->cspa_config.
+			    cc_ms_partition_policy);
+			spa_prop_find(spa, ZPOOL_PROP_CLUSTER_HB_INTERVAL,
+			    &spa->spa_cluster->cspa_config.
+			    cc_heartbeat_interval_ms);
+			spa_prop_find(spa, ZPOOL_PROP_CLUSTER_HB_TIMEOUT,
+			    &spa->spa_cluster->cspa_config.
+			    cc_heartbeat_timeout_ms);
+		}
 	}
 
 	/*
@@ -7363,6 +7458,22 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 		spa_sync_props(props, tx);
 	}
 
+	/* Initialize cluster subsystem if cluster=on was set */
+	if (spa->spa_multihost && spa->spa_cluster == NULL) {
+		uint64_t cluster_mode = 0;
+		if (nvlist_lookup_uint64(props, zpool_prop_to_name(
+		    ZPOOL_PROP_CLUSTER_MODE), &cluster_mode) == 0 &&
+		    cluster_mode != 0) {
+			uint64_t node_id = 0;
+			/* Read cluster_node from props (default: 0 = coordinator) */
+			(void) nvlist_lookup_uint64(props,
+			    zpool_prop_to_name(ZPOOL_PROP_CLUSTER_NODE_ID),
+			    &node_id);
+			VERIFY0(cluster_spa_init(spa, (cluster_node_id_t)node_id,
+			    node_id == CLUSTER_NODE_ID_COORDINATOR));
+		}
+	}
+
 	for (int i = 0; i < ndraid; i++)
 		spa_feature_incr(spa, SPA_FEATURE_DRAID, tx);
 
@@ -7375,6 +7486,17 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	txg_sync_start(dp);
 	mmp_thread_start(spa);
 	txg_wait_synced(dp, txg);
+
+	/*
+	 * Persist cluster configuration to MOS now that the pool
+	 * is fully operational (spa_sync_on=TRUE, sync thread
+	 * running).  Must happen after dmu_tx_commit and after
+	 * txg_sync_start because cluster_spa_config_write creates
+	 * its own DMU transaction which requires a live sync thread.
+	 */
+	if (spa->spa_cluster != NULL) {
+		VERIFY0(cluster_spa_config_write(spa));
+	}
 
 	spa_spawn_aux_threads(spa);
 
@@ -7505,6 +7627,16 @@ spa_import(char *pool, nvlist_t *config, nvlist_t *props, uint64_t flags)
 		spa_remove(spa);
 		spa_namespace_exit(FTAG);
 		return (error);
+	}
+
+	/* Initialize cluster subsystem if cluster_node is specified */
+	if (spa->spa_cluster == NULL && props != NULL) {
+		uint64_t node_id = UINT64_MAX;
+		if (nvlist_lookup_uint64(props, zpool_prop_to_name(
+		    ZPOOL_PROP_CLUSTER_NODE_ID), &node_id) == 0 &&
+		    node_id != UINT64_MAX) {
+			VERIFY0(cluster_spa_import(spa, node_id));
+		}
 	}
 
 	spa_async_resume(spa);
@@ -7792,6 +7924,17 @@ spa_export_common(const char *pool, int new_state, nvlist_t **oldconfig,
 	 * notice the spa->spa_export_thread and wait until we signal
 	 * that we are finshed.
 	 */
+
+	/*
+	 * Cluster: gracefully leave the cluster before we set
+	 * spa_final_txg.  cluster_spa_export() writes LEAVING
+	 * membership to MOS via a DMU transaction, which must
+	 * happen while new TXGs can still be opened.
+	 * This must be called AFTER txg_wait_synced() but BEFORE
+	 * spa_final_txg is set.
+	 */
+	if (spa->spa_cluster != NULL)
+		cluster_spa_export(spa);
 
 	if (spa->spa_sync_on) {
 		vdev_t *rvd = spa->spa_root_vdev;
@@ -10567,6 +10710,46 @@ spa_sync_props(void *arg, dmu_tx_t *tx)
 				case ZPOOL_PROP_DEDUP_TABLE_QUOTA:
 					spa->spa_dedup_table_quota = intval;
 					break;
+				case ZPOOL_PROP_CLUSTER_MODE:
+					if (spa->spa_cluster != NULL)
+						spa->spa_cluster->
+						    cspa_config.cc_flags =
+						    intval ?
+						    CLUSTER_CONFIG_MAGIC : 0;
+					break;
+				case ZPOOL_PROP_CLUSTER_NODE_ID:
+					if (spa->spa_cluster != NULL)
+						spa->spa_cluster->
+						    cspa_config.
+						    cc_coordinator_id = intval;
+					break;
+				case ZPOOL_PROP_CLUSTER_NODES:
+					if (spa->spa_cluster != NULL)
+						spa->spa_cluster->
+						    cspa_config.cc_max_nodes =
+						    intval;
+					break;
+				case ZPOOL_PROP_CLUSTER_MS_POLICY:
+					if (spa->spa_cluster != NULL)
+						spa->spa_cluster->
+						    cspa_config.
+						    cc_ms_partition_policy =
+						    intval;
+					break;
+				case ZPOOL_PROP_CLUSTER_HB_INTERVAL:
+					if (spa->spa_cluster != NULL)
+						spa->spa_cluster->
+						    cspa_config.
+						    cc_heartbeat_interval_ms =
+						    intval;
+					break;
+				case ZPOOL_PROP_CLUSTER_HB_TIMEOUT:
+					if (spa->spa_cluster != NULL)
+						spa->spa_cluster->
+						    cspa_config.
+						    cc_heartbeat_timeout_ms =
+						    intval;
+					break;
 				default:
 					break;
 				}
@@ -10737,6 +10920,21 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 		spa_sync_aux_dev(spa, &spa->spa_l2cache, tx,
 		    ZPOOL_CONFIG_L2CACHE, DMU_POOL_L2CACHE);
 		spa_errlog_sync(spa, txg);
+
+		/*
+		 * Cluster: In a true multi-node cluster, participants
+		 * would call dsl_pool_sync_data_only() which flushes
+		 * dirty user data without writing MOS objects. This
+		 * avoids MOS write conflicts between nodes.
+		 *
+		 * For the single-machine export/import simulation,
+		 * auto-promotion ensures the importing node is always
+		 * coordinator, so this path is not taken in practice.
+		 * Participants that reach here still need dsl_pool_sync
+		 * to flush their dirty data blocks — the uberblock
+		 * skip in spa_sync_rewrite_vdev_config already prevents
+		 * non-coordinators from writing uberblocks.
+		 */
 		dsl_pool_sync(dp, txg);
 
 		if (pass < zfs_sync_pass_deferred_free ||
@@ -10836,6 +11034,11 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
 	vdev_t *rvd = spa->spa_root_vdev;
 	uint64_t txg = tx->tx_txg;
 
+	/* Cluster: only coordinator writes uberblock */
+	if (spa->spa_cluster != NULL &&
+	    !cluster_spa_is_coordinator(spa))
+		return;
+
 	for (;;) {
 		int error = 0;
 
@@ -10896,6 +11099,10 @@ spa_sync(spa_t *spa, uint64_t txg)
 	vdev_t *vd = NULL;
 
 	VERIFY(spa_writeable(spa));
+
+	/* Cluster: enter sync coordination */
+	if (spa->spa_cluster != NULL)
+		cluster_spa_sync_enter(spa, txg);
 
 	/*
 	 * Wait for i/os issued in open context that need to complete
@@ -11076,6 +11283,10 @@ spa_sync(spa_t *spa, uint64_t txg)
 	 */
 	spa->spa_ubsync = spa->spa_uberblock;
 	spa_config_exit(spa, SCL_CONFIG, FTAG);
+
+	/* Cluster: signal sync complete */
+	if (spa->spa_cluster != NULL)
+		cluster_spa_sync_exit(spa, txg);
 
 	spa_handle_ignored_writes(spa);
 

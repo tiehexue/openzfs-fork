@@ -28,6 +28,8 @@
 #include <sys/uberblock_impl.h>
 #include <sys/vdev_impl.h>
 #include <sys/mmp.h>
+#include <sys/spa_impl.h>
+#include <sys/cluster/cluster_spa.h>
 
 int
 uberblock_verify(uberblock_t *ub)
@@ -48,6 +50,8 @@ uberblock_verify(uberblock_t *ub)
 boolean_t
 uberblock_update(uberblock_t *ub, vdev_t *rvd, uint64_t txg, uint64_t mmp_delay)
 {
+	spa_t *spa = rvd->vdev_spa;
+
 	ASSERT(ub->ub_txg < txg);
 
 	/*
@@ -60,7 +64,7 @@ uberblock_update(uberblock_t *ub, vdev_t *rvd, uint64_t txg, uint64_t mmp_delay)
 	ub->ub_timestamp = gethrestime_sec();
 	ub->ub_software_version = SPA_VERSION;
 	ub->ub_mmp_magic = MMP_MAGIC;
-	if (spa_multihost(rvd->vdev_spa)) {
+	if (spa_multihost(spa)) {
 		ub->ub_mmp_delay = mmp_delay;
 		ub->ub_mmp_config = MMP_SEQ_SET(0) |
 		    MMP_INTERVAL_SET(zfs_multihost_interval) |
@@ -69,6 +73,27 @@ uberblock_update(uberblock_t *ub, vdev_t *rvd, uint64_t txg, uint64_t mmp_delay)
 		ub->ub_mmp_delay = 0;
 		ub->ub_mmp_config = 0;
 	}
+
+	/*
+	 * Cluster: Encode cluster information into the uberblock.
+	 * We repurpose upper bits of ub_mmp_config and ub_mmp_delay:
+	 *   - ub_mmp_config bits 48-63: coordinator node ID
+	 *   - ub_mmp_delay: cluster epoch (when cluster is active)
+	 * This allows any node reading the uberblock to identify
+	 * which coordinator wrote it and the cluster epoch.
+	 */
+	if (spa->spa_cluster != NULL && cluster_spa_is_coordinator(spa)) {
+		cluster_spa_t *cspa = spa->spa_cluster;
+		/*
+		 * Encode coordinator node ID + 1 in bits 48-63 so
+		 * node 0 is non-zero (0 means "no cluster").
+		 */
+		ub->ub_mmp_config |=
+		    ((uint64_t)(cspa->cspa_local_id + 1) << 48);
+		ub->ub_mmp_delay =
+		    cspa->cspa_membership.cm_epoch;
+	}
+
 	ub->ub_checkpoint_txg = 0;
 
 	return (BP_GET_LOGICAL_BIRTH(&ub->ub_rootbp) == txg);

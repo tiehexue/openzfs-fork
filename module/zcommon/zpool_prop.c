@@ -94,6 +94,13 @@ zpool_prop_init(void)
 		{ NULL }
 	};
 
+	static const zprop_index_t cluster_ms_policy_table[] = {
+		{ "static",	0},
+		{ "dynamic",	1},
+		{ "adaptive",	2},
+		{ NULL }
+	};
+
 	static const zprop_index_t failuremode_table[] = {
 		{ "wait",	ZIO_FAILURE_MODE_WAIT },
 		{ "continue",	ZIO_FAILURE_MODE_CONTINUE },
@@ -245,6 +252,33 @@ zpool_prop_init(void)
 	zprop_register_hidden(ZPOOL_PROP_DEDUPCACHED,
 	    ZPOOL_DEDUPCACHED_PROP_NAME, PROP_TYPE_NUMBER, PROP_READONLY,
 	    ZFS_TYPE_POOL, "DEDUPCACHED", B_FALSE, sfeatures);
+
+	/* Cluster ZFS properties */
+	zprop_register_index(ZPOOL_PROP_CLUSTER_MODE, "cluster", 0,
+	    PROP_DEFAULT, ZFS_TYPE_POOL, "on | off", "CLUSTER",
+	    boolean_table, sfeatures);
+	zprop_register_number(ZPOOL_PROP_CLUSTER_NODE_ID, "cluster_node",
+	    0, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    "<0-31 (0=coordinator)>", "CLUSTER_NODE", B_FALSE, sfeatures);
+	zprop_register_number(ZPOOL_PROP_CLUSTER_NODES, "cluster_nodes",
+	    1, PROP_DEFAULT, ZFS_TYPE_POOL, "<1-32>", "CLUSTER_NODES",
+	    B_FALSE, sfeatures);
+	zprop_register_index(ZPOOL_PROP_CLUSTER_MS_POLICY, "cluster_ms_policy",
+	    1, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    "static | dynamic | adaptive", "CLUSTER_MS_POLICY",
+	    cluster_ms_policy_table, sfeatures);
+	zprop_register_number(ZPOOL_PROP_CLUSTER_HB_INTERVAL,
+	    "cluster_hb_interval", 1000, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    "<msec>", "CLUSTER_HB_INT", B_FALSE, sfeatures);
+	zprop_register_number(ZPOOL_PROP_CLUSTER_HB_TIMEOUT,
+	    "cluster_hb_timeout", 5000, PROP_DEFAULT, ZFS_TYPE_POOL,
+	    "<msec>", "CLUSTER_HB_TMO", B_FALSE, sfeatures);
+	zprop_register_number(ZPOOL_PROP_CLUSTER_EPOCH, "cluster_epoch",
+	    0, PROP_READONLY, ZFS_TYPE_POOL, "<epoch>", "CLUSTER_EPOCH",
+	    B_FALSE, sfeatures);
+	zprop_register_number(ZPOOL_PROP_CLUSTER_COORDINATOR,
+	    "cluster_coordinator", 0, PROP_READONLY, ZFS_TYPE_POOL,
+	    "<node-id>", "CLUSTER_COORD", B_FALSE, sfeatures);
 
 	zfs_mod_list_supported_free(sfeatures);
 }
