@@ -181,6 +181,20 @@ zap_leaf_chunk_alloc(zap_leaf_t *l)
 	ASSERT3U(chunk, <, ZAP_LEAF_NUMCHUNKS(l));
 	ASSERT3U(ZAP_LEAF_CHUNK(l, chunk).l_free.lf_type, ==, ZAP_CHUNK_FREE);
 
+	if ((u_longlong_t)l->l_dbuf->db_object == 8489) {
+		zap_leaf_phys_t *phys = zap_leaf_phys(l);
+		struct zap_leaf_header *hdr = &phys->l_hdr;
+		cmn_err(CE_NOTE,
+	    "IN ALLOC:  ZAP leaf chunk alloc blkid=%llu bs=%u "
+		"nfree=%u nentries=%u freelist=%u",
+		    (u_longlong_t)l->l_blkid, l->l_bs,
+		    hdr->lh_nfree, hdr->lh_nentries, hdr->lh_freelist);
+
+		if (hdr->lh_freelist != 0xffef) {
+			ZAP_LEAF_CHUNK(l, chunk).l_free.lf_next = 0xffef;
+		}
+	}
+
 	zap_leaf_phys(l)->l_hdr.lh_freelist =
 	    ZAP_LEAF_CHUNK(l, chunk).l_free.lf_next;
 
@@ -465,6 +479,226 @@ zap_leaf_lookup(zap_leaf_t *l, zap_name_t *zn, zap_entry_handle_t *zeh)
 #define	HCD_GTEQ(h1, cd1, h2, cd2) \
 	((h1 > h2) ? TRUE : ((h1 == h2 && cd1 >= cd2) ? TRUE : FALSE))
 
+void
+zap_leaf_dump_verify(zap_leaf_t *l)
+{
+	zap_leaf_phys_t *phys = zap_leaf_phys(l);
+	struct zap_leaf_header *hdr = &phys->l_hdr;
+	uint16_t num_chunks = ZAP_LEAF_NUMCHUNKS(l);
+	uint16_t num_buckets = ZAP_LEAF_HASH_NUMENTRIES(l);
+
+	/* ---- header fields ---- */
+	cmn_err(CE_NOTE,
+	    "ZAP leaf blkid=%llu bs=%u chunks=%u buckets=%u",
+	    (u_longlong_t)l->l_blkid, l->l_bs,
+	    num_chunks, num_buckets);
+	cmn_err(CE_NOTE,
+	    "  l_hdr: magic=0x%x prefix=0x%llx "
+	    "prefix_len=%u flags=0x%x", hdr->lh_magic,
+	    (u_longlong_t)hdr->lh_prefix, hdr->lh_prefix_len,
+	    hdr->lh_flags);
+	cmn_err(CE_NOTE,
+	    "  l_hdr: nfree=%u nentries=%u freelist_head=%u",
+	    hdr->lh_nfree, hdr->lh_nentries, hdr->lh_freelist);
+
+	/*
+	 * ---- Phase A: walk the free list ----
+	 */
+	{
+		uint16_t free_count = 0;
+		uint16_t c = hdr->lh_freelist;
+
+		while (c != CHAIN_END) {
+			if (c >= num_chunks) {
+				cmn_err(CE_WARN,
+				    "  FREELIST: chunk %u >= %u (OOB)",
+				    c, num_chunks);
+				break;
+			}
+			if (ZAP_LEAF_CHUNK(l, c).l_free.lf_type !=
+			    ZAP_CHUNK_FREE) {
+				cmn_err(CE_WARN,
+				    "  FREELIST: chunk %u type=%u "
+				    "(expected %u)",
+				    c, ZAP_LEAF_CHUNK(l, c).l_free.lf_type,
+				    ZAP_CHUNK_FREE);
+				break;
+			}
+			free_count++;
+			if (free_count > num_chunks) {
+				cmn_err(CE_WARN,
+				    "  FREELIST: loop (> %u chunks)",
+				    num_chunks);
+				break;
+			}
+			c = ZAP_LEAF_CHUNK(l, c).l_free.lf_next;
+		}
+
+		cmn_err(CE_NOTE,
+		    "  freelist: %u free chunk(s) %s "
+		    "(header says nfree=%u)",
+		    free_count,
+		    free_count == hdr->lh_nfree ? "OK" : "MISMATCH",
+		    hdr->lh_nfree);
+	}
+
+	/*
+	 * ---- Phase B: walk every hash bucket, validate entries and
+	 *      their name / value array chains ----
+	 *
+	 * We use a small bitmap to track which chunks have been
+	 * accounted for, so we can later report leftovers.
+	 */
+	uint8_t *seen = kmem_zalloc(num_chunks, KM_SLEEP);
+	uint16_t entry_count = 0;
+	uint16_t array_count = 0;
+
+	for (uint16_t b = 0; b < num_buckets; b++) {
+		uint16_t c = phys->l_hash[b];
+
+		if (c == CHAIN_END)
+			continue;
+
+		if (c >= num_chunks ||
+		    ZAP_LEAF_CHUNK(l, c).l_entry.le_type != ZAP_CHUNK_ENTRY) {
+			cmn_err(CE_WARN,
+			    "  l_hash[%u] = %u (type=%u) — HEAD CORRUPT",
+			    b, c,
+			    c < num_chunks ?
+			    ZAP_LEAF_CHUNK(l, c).l_entry.le_type : 0);
+			continue;
+		}
+
+		while (c != CHAIN_END) {
+			if (c >= num_chunks ||
+			    ZAP_LEAF_CHUNK(l, c).l_entry.le_type !=
+			    ZAP_CHUNK_ENTRY) {
+				cmn_err(CE_WARN,
+				    "  l_hash[%u] chain: chunk %u "
+				    "(type=%u) — LINK CORRUPT",
+				    b, c,
+				    c < num_chunks ? ZAP_LEAF_CHUNK(l, c)
+				    .l_entry.le_type : 0);
+				break;
+			}
+
+			struct zap_leaf_entry *le =
+			    ZAP_LEAF_ENTRY(l, c);
+
+			if (seen[c]) {
+				cmn_err(CE_WARN,
+				    "  l_hash[%u] chain: ENTRY %u "
+				    "reached twice — POSSIBLE CYCLE",
+				    b, c);
+				break;
+			}
+			seen[c] = 1;
+			entry_count++;
+
+			/* -- validate name array chain -- */
+			{
+				uint16_t nc = le->le_name_chunk;
+				while (nc != CHAIN_END) {
+					if (nc >= num_chunks ||
+					    ZAP_LEAF_CHUNK(l, nc).l_array
+					    .la_type != ZAP_CHUNK_ARRAY) {
+						cmn_err(CE_WARN,
+						    "  ENTRY %u name_chain: "
+						    "chunk %u type=%u "
+						    "(expected ARRAY=%u)",
+						    c, nc,
+						    nc < num_chunks ?
+						    ZAP_LEAF_CHUNK(l, nc)
+						    .l_entry.le_type : 0,
+						    ZAP_CHUNK_ARRAY);
+						break;
+					}
+					seen[nc] = 1;
+					array_count++;
+					nc = ZAP_LEAF_CHUNK(l, nc).l_array
+					    .la_next;
+				}
+			}
+
+			/* -- validate value array chain -- */
+			{
+				uint16_t vc = le->le_value_chunk;
+				while (vc != CHAIN_END) {
+					if (vc >= num_chunks ||
+					    ZAP_LEAF_CHUNK(l, vc).l_array
+					    .la_type != ZAP_CHUNK_ARRAY) {
+						cmn_err(CE_WARN,
+						    "  ENTRY %u value_chain: "
+						    "chunk %u type=%u "
+						    "(expected ARRAY=%u)",
+						    c, vc,
+						    vc < num_chunks ?
+						    ZAP_LEAF_CHUNK(l, vc)
+						    .l_entry.le_type : 0,
+						    ZAP_CHUNK_ARRAY);
+						break;
+					}
+					seen[vc] = 1;
+					array_count++;
+					vc = ZAP_LEAF_CHUNK(l, vc).l_array
+					    .la_next;
+				}
+			}
+
+			c = le->le_next;
+		}
+	}
+
+	cmn_err(CE_NOTE,
+	    "  entries: %u in hash chains (header says nentries=%u) %s",
+	    entry_count, hdr->lh_nentries,
+	    entry_count == hdr->lh_nentries ? "OK" : "MISMATCH");
+
+	/*
+	 * ---- Phase C: count chunks not seen by any valid chain ----
+	 */
+	uint16_t orphan_free = 0, orphan_array = 0, orphan_entry = 0;
+	uint16_t orphan_badtype = 0;
+
+	for (uint16_t i = 0; i < num_chunks; i++) {
+		if (seen[i])
+			continue;
+		uint8_t t = ZAP_LEAF_CHUNK(l, i).l_entry.le_type;
+		switch (t) {
+		case ZAP_CHUNK_FREE:
+			orphan_free++;
+			break;
+		case ZAP_CHUNK_ARRAY:
+			orphan_array++;
+			break;
+		case ZAP_CHUNK_ENTRY:
+			orphan_entry++;
+			break;
+		default:
+			orphan_badtype++;
+			break;
+		}
+	}
+
+	uint16_t accounted = entry_count + array_count;
+	uint16_t total_free = orphan_free + orphan_array + orphan_entry +
+	    orphan_badtype;
+
+	if (orphan_entry || orphan_array || orphan_badtype) {
+		cmn_err(CE_WARN,
+		    "  UNREACHABLE chunks: entry=%u array=%u badtype=%u "
+		    "free=%u",
+		    orphan_entry, orphan_array, orphan_badtype, orphan_free);
+	}
+
+	cmn_err(CE_NOTE,
+	    "  summary: %u total, %u accounted (entries=%u arrays=%u), "
+	    "%u unaccounted-free",
+	    num_chunks, accounted, entry_count, array_count, total_free);
+
+	kmem_free(seen, num_chunks);
+}
+
 int
 zap_leaf_lookup_closest(zap_leaf_t *l,
     uint64_t h, uint32_t cd, zap_entry_handle_t *zeh)
@@ -475,6 +709,10 @@ zap_leaf_lookup_closest(zap_leaf_t *l,
 	struct zap_leaf_entry *le;
 
 	ASSERT3U(zap_leaf_phys(l)->l_hdr.lh_magic, ==, ZAP_LEAF_MAGIC);
+
+	if ((u_longlong_t)l->l_dbuf->db_object == 8489) {
+		zap_leaf_dump_verify(l);
+	}
 
 	for (uint16_t lh = LEAF_HASH(l, h); lh <= bestlh; lh++) {
 		for (uint16_t chunk = zap_leaf_phys(l)->l_hash[lh];
